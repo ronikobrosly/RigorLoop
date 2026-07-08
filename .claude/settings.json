@@ -1,0 +1,9 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": ["."]
+    }
+  }
+}
