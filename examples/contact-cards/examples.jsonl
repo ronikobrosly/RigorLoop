@@ -1,0 +1,24 @@
+{"expected_output": "{\"city\": \"London\", \"email\": \"ada@calc.org\", \"name\": \"Ada Lovelace\"}", "input": "Name: Ada Lovelace\nEmail: ada@calc.org\nCity: London"}
+{"expected_output": "{\"city\": \"Arlington\", \"email\": \"grace@navy.mil\", \"name\": \"Grace Hopper\"}", "input": "Grace Hopper lives in Arlington. Reach them at grace@navy.mil."}
+{"expected_output": "{\"city\": \"Wilmslow\", \"email\": \"alan@bletchley.uk\", \"name\": \"Alan Turing\"}", "input": "Contact card \u2014 Alan Turing <alan@bletchley.uk> based in Wilmslow"}
+{"expected_output": "{\"city\": \"Hampton\", \"email\": \"kj@nasa.gov\", \"name\": \"Katherine Johnson\"}", "input": "Name: Katherine Johnson\nEmail: kj@nasa.gov\nCity: Hampton"}
+{"expected_output": "{\"city\": \"Austin\", \"email\": \"ewd@utexas.edu\", \"name\": \"Edsger Dijkstra\"}", "input": "Edsger Dijkstra lives in Austin. Reach them at ewd@utexas.edu."}
+{"expected_output": "{\"city\": \"Cambridge\", \"email\": \"liskov@mit.edu\", \"name\": \"Barbara Liskov\"}", "input": "Contact card \u2014 Barbara Liskov <liskov@mit.edu> based in Cambridge"}
+{"expected_output": "{\"city\": \"Stanford\", \"email\": \"don@stanford.edu\", \"name\": \"Donald Knuth\"}", "input": "Name: Donald Knuth\nEmail: don@stanford.edu\nCity: Stanford"}
+{"expected_output": "{\"city\": \"Boston\", \"email\": \"mh@draper.com\", \"name\": \"Margaret Hamilton\"}", "input": "Margaret Hamilton lives in Boston. Reach them at mh@draper.com."}
+{"expected_output": "{\"city\": \"Palo Alto\", \"email\": \"jmc@stanford.edu\", \"name\": \"John McCarthy\"}", "input": "Contact card \u2014 John McCarthy <jmc@stanford.edu> based in Palo Alto"}
+{"expected_output": "{\"city\": \"Yorktown\", \"email\": \"fran@ibm.com\", \"name\": \"Frances Allen\"}", "input": "Name: Frances Allen\nEmail: fran@ibm.com\nCity: Yorktown"}
+{"expected_output": "{\"city\": \"Oxford\", \"email\": \"car@oxford.uk\", \"name\": \"Tony Hoare\"}", "input": "Tony Hoare lives in Oxford. Reach them at car@oxford.uk."}
+{"expected_output": "{\"city\": \"Boston\", \"email\": \"radia@dec.com\", \"name\": \"Radia Perlman\"}", "input": "Contact card \u2014 Radia Perlman <radia@dec.com> based in Boston"}
+{"expected_output": "{\"city\": \"Murray Hill\", \"email\": \"dmr@bell-labs.com\", \"name\": \"Dennis Ritchie\"}", "input": "Name: Dennis Ritchie\nEmail: dmr@bell-labs.com\nCity: Murray Hill"}
+{"expected_output": "{\"city\": \"Palo Alto\", \"email\": \"adele@parc.com\", \"name\": \"Adele Goldberg\"}", "input": "Adele Goldberg lives in Palo Alto. Reach them at adele@parc.com."}
+{"expected_output": "{\"city\": \"Murray Hill\", \"email\": \"ken@bell-labs.com\", \"name\": \"Ken Thompson\"}", "input": "Contact card \u2014 Ken Thompson <ken@bell-labs.com> based in Murray Hill"}
+{"expected_output": "{\"city\": \"Philadelphia\", \"email\": \"jean@eniac.org\", \"name\": \"Jean Bartik\"}", "input": "Name: Jean Bartik\nEmail: jean@eniac.org\nCity: Philadelphia"}
+{"expected_output": "{\"city\": \"Zurich\", \"email\": \"wirth@ethz.ch\", \"name\": \"Niklaus Wirth\"}", "input": "Niklaus Wirth lives in Zurich. Reach them at wirth@ethz.ch."}
+{"expected_output": "{\"city\": \"Pittsburgh\", \"email\": \"shaw@cmu.edu\", \"name\": \"Mary Shaw\"}", "input": "Contact card \u2014 Mary Shaw <shaw@cmu.edu> based in Pittsburgh"}
+{"expected_output": "{\"city\": \"New York\", \"email\": \"ll@microsoft.com\", \"name\": \"Leslie Lamport\"}", "input": "Name: Leslie Lamport\nEmail: ll@microsoft.com\nCity: New York"}
+{"expected_output": "{\"city\": \"Cambridge\", \"email\": \"shafi@mit.edu\", \"name\": \"Shafi Goldwasser\"}", "input": "Shafi Goldwasser lives in Cambridge. Reach them at shafi@mit.edu."}
+{"expected_output": "{\"city\": \"McLean\", \"email\": \"vint@google.com\", \"name\": \"Vint Cerf\"}", "input": "Contact card \u2014 Vint Cerf <vint@google.com> based in McLean"}
+{"expected_output": "{\"city\": \"Ann Arbor\", \"email\": \"lynn@umich.edu\", \"name\": \"Lynn Conway\"}", "input": "Name: Lynn Conway\nEmail: lynn@umich.edu\nCity: Ann Arbor"}
+{"expected_output": "{\"city\": \"Boston\", \"email\": \"timbl@w3.org\", \"name\": \"Tim Berners-Lee\"}", "input": "Tim Berners-Lee lives in Boston. Reach them at timbl@w3.org."}
+{"expected_output": "{\"city\": \"Palo Alto\", \"email\": \"anita@borg.org\", \"name\": \"Anita Borg\"}", "input": "Contact card \u2014 Anita Borg <anita@borg.org> based in Palo Alto"}

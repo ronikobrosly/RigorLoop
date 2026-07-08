@@ -1,0 +1,28 @@
+# RigorLoop project configuration. Run `rigorloop check` to validate.
+
+[task]
+description_file = "task.md"
+solution_kind    = "script"          # script | skill | guidance
+examples_file    = "examples.jsonl"
+
+[split]
+ratios = [0.6, 0.2, 0.2]             # dev / validation / test
+seed   = 17
+
+[loop]
+max_loops              = 12
+executors_per_loop     = 4
+dev_examples_in_prompt = 30
+
+[validation]
+val_every  = 3
+max_peeks  = 10
+patience   = 2
+target_pass_rate = 0.95
+
+[agents]
+model      = "claude-sonnet-5"
+timeout_s  = 300
+
+[[checks]]
+type = "json_equality"

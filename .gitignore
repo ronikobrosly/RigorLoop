@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RigorLoop additions
+src/rigorloop/_version.py
+runs/
+.uv-cache/
