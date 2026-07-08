@@ -194,8 +194,7 @@ Notes:
 
 ## 7. Release workflow — `.github/workflows/release.yml`
 
-Trigger: push of a tag matching `v[0-9]+.[0-9]+.[0-9]+*` (e.g. `v0.3.0`,
-`v1.0.0rc1`).
+Trigger: push of a tag matching `v[0-9]+.[0-9]+.[0-9]+*` (e.g. `v0.3.0`).
 
 ```
 jobs:

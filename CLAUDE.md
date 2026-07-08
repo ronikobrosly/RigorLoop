@@ -24,6 +24,16 @@ The "coding solution" can take a number of forms:
 * Claude will be called in headless model and without tools (`claude -p --tools ""`) to spin up the above agents.
 
 
+## Comprehensive implementation plan
+
+See the plan in `PLAN.md`
+
+
 ## Coding style
 
 See the rules and guidelines described in `CODING_STYLE.md`
+
+
+## Packaging as an open source release
+
+See the `PACKAGING_PLAN.md` file for instructions on how to setup the packaging around this framework. Includes details on dependencies, the `pyproject.toml` file, linting, testing, and deploying to PyPi.
