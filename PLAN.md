@@ -64,7 +64,9 @@ src/rigorloop/
 │   ├── scoring_calcs.py      # check evaluation, aggregation, statistics
 │   ├── strategy_calcs.py     # context assembly, decision & response parsing,
 │   │                         # cadence rules, stopping rules, leaderboard
-│   └── prompt_calcs.py       # pure prompt-string builders for both agent roles
+│   └── prompt_calcs.py       # pure prompt-string builders in two channels:
+│                             # agent-context (strategy, executor) and
+│                             # evaluation (solution-under-test, judge)
 └── shell/
     ├── agent_calls.py        # claude subprocess wrapper, concurrency, retries
     ├── io_actions.py         # run directory, file read/write, sandboxed
@@ -101,9 +103,9 @@ Result[T, E] = Ok(value) | Err(error)
 
 # Examples — the split is encoded in the TYPE, not a field.
 Example        = (example_id: str, input_text: str, expected_output: str)
-DevExample     = wraps Example      # only type prompt builders accept
-ValExample     = wraps Example      # never enters any prompt
-TestExample    = wraps Example      # never enters any prompt
+DevExample     = wraps Example      # only type agent-context builders accept
+ValExample     = wraps Example      # never enters any agent-context prompt
+TestExample    = wraps Example      # never enters any agent-context prompt
 SplitManifest  = (seed, ratios, per-split example-id hashes)
 
 # What we are building
@@ -124,11 +126,23 @@ CandidateScore = (pass_rate, ci_low, ci_high, per_check_breakdown, n)
 # Strategy
 StrategyLogEntry  = (loop_index, observations, hypotheses, directives_issued,
                      dev_summary, Option[val_summary])
-Directive         = (directive_id, approach_summary, instructions)
-StrategyDecision  = Continue(directives) | RequestValidation(candidate_id)
-                  | Stop(StopReason)
+ChampionArtifact  = (candidate_id, kind, content)    # solution content ONLY —
+                                                     # no scores, no failures
+Directive         = (directive_id, approach_summary, instructions,
+                     base: Option[ChampionArtifact]) # refine champion / explore
+StrategyDecision  = Continue(directives, validate: Option[candidate_id])
+                  | Stop(StopReason)                 # validation is a field of
+                                                     # Continue, not a variant:
+                                                     # a peek never stalls a loop
 StopReason        = BudgetExhausted | ValidationPlateau | TargetReached
-                  | StrategyRequestedStop(reason)
+                  | StrategyRequestedStop(reason) | StrategyUnresponsive
+
+# Prompt channels — distinct types; the §6 leakage guards apply to the first
+AgentContextPrompt = prompt for the strategy or executor agents; builders
+                     accept Dev-typed examples and aggregate scores only
+EvalPrompt         = prompt running a solution-under-test or an LLM judge on
+                     ONE example (any split); its output returns to the
+                     harness as data, never into an AgentContextPrompt
 
 # Effects — descriptions the core returns and the shell executes
 AgentRequest   = (role, prompt, model, timeout_s)
@@ -146,13 +160,20 @@ boundary the core never re-checks validity.
 
 1. Shell reads `rigorloop.toml` + examples JSONL; core parses both into typed
    config and `list[Example]` (`Result`-returning).
-2. `dataset_calcs.split(examples, ratios, seed)` deterministically partitions
+2. Core detects **exact duplicates** (identical input text) before splitting:
+   duplicates are collapsed to one example and a warning with counts is
+   surfaced. A duplicate straddling dev and test would silently corrupt the
+   holdout. Near-duplicate detection is out of scope for v1 and called out as
+   a caveat in the README.
+3. `dataset_calcs.split(examples, ratios, seed)` deterministically partitions
    into dev/val/test (default **60/20/20**, configurable). Pure: the seed is a
    parameter. Guarantees: disjoint, exhaustive, stable for a given seed.
-3. Core emits a `SplitManifest` with content hashes; shell persists it. On
+4. Core emits a `SplitManifest` with content hashes; shell persists it. On
    resume, the manifest is re-verified so a re-run can never reshuffle examples
-   across splits (a silent-leakage guard).
-4. Core computes power warnings (see §8) — e.g. "validation set of 12 examples
+   across splits (a silent-leakage guard). The manifest also pins the
+   configured agent model and `claude` CLI version, because skill/guidance
+   scores are conditional on the evaluating model (§8).
+5. Core computes power warnings (see §8) — e.g. "validation set of 12 examples
    can only distinguish pass-rate differences of ~±25 points" — and the shell
    surfaces them before spending tokens.
 
@@ -160,22 +181,35 @@ boundary the core never re-checks validity.
 
 Each iteration:
 
-1. **Strategy turn.** Core assembles the strategy context — its own full log,
+1. **Strategy turn.** Core assembles the strategy context — full detail for
+   the most recent `strategy_full_detail_loops` loops (default 4) with compact
+   per-loop summaries beyond that (so the context can't grow without bound),
    the dev leaderboard with confidence intervals, aggregated dev failure
-   patterns for recent candidates, and (if a validation was run) the aggregate
-   validation score. `prompt_calcs.build_strategy_prompt` renders it. Shell
-   runs the agent; core parses the JSON reply into a `StrategyDecision`
-   (`Result`; one reformat-retry on parse failure).
-2. **Executor fan-out.** For `Continue(directives)`, core builds one executor
-   prompt per directive: task description, the directive, the output contract,
-   the check descriptions, and a sampled subset of dev examples (default
-   `min(30, all)`, sample chosen by core from an injected seed). Shell runs
-   the K agents concurrently (default 4).
+   patterns for recent candidates, the current champion's full solution
+   content, and (if a validation was run) the aggregate validation score.
+   `prompt_calcs.build_strategy_prompt` renders it. Shell runs the agent; core
+   parses the JSON reply into a `StrategyDecision` (`Result`; one
+   reformat-retry on parse failure). If the retry also fails, the harness
+   substitutes a fallback decision — `Continue` with a single
+   refine-the-champion directive — and logs the substitution; two consecutive
+   fallbacks end the run with `Stop(StrategyUnresponsive)`.
+2. **Executor fan-out.** For `Continue(directives, _)`, core builds one
+   executor prompt per directive: task description, the directive (which may
+   embed the champion artifact as a refinement starting point — see §6), the
+   output contract, the check descriptions, and a sampled subset of dev
+   examples (default `min(30, all)`). The subset is **resampled every loop**,
+   deterministically from the injected seed and loop index; the strategy
+   prompt states this explicitly so loop-to-loop score movement isn't
+   over-attributed to directives when it is partly sample luck. Shell runs the
+   K agents concurrently (default 4).
 3. **Materialize & execute.** Core parses each reply's single fenced
    `solution` block into a `Candidate` (malformed → one retry, then recorded
    as a failed candidate, never crashing the loop). Shell materializes and
    evaluates it against every dev example, per solution kind (§7), collecting
-   raw outputs as plain data.
+   raw outputs as plain data. Evaluation of a candidate **short-circuits**
+   after `max_consecutive_eval_failures` consecutive errors/timeouts (default
+   5) — a hanging script must not burn dev-set-size × timeout — and the
+   candidate is recorded with an aborted evaluation.
 4. **Score.** `scoring_calcs` evaluates deterministic checks purely; for
    `LlmJudge` checks the shell first collects judge verdicts
    (n-sample majority vote via `claude -p --tools ""`), then hands the verdict
@@ -188,8 +222,11 @@ Each iteration:
 
 - Cadence decided by a pure rule in `strategy_calcs`: validate the current
   dev-best candidate every `val_every` loops (default 3), or when a new
-  candidate beats the previous dev-best by a configured margin, or when the
-  strategy agent explicitly issues `RequestValidation`.
+  candidate beats the previous dev-best **beyond the paired-test noise band**
+  (§8 — raw margins chase noise), or when the strategy agent sets the
+  `validate` field of `Continue`. Triggered peeks respect a minimum gap of
+  `min_loops_between_peeks` loops (default 2), so the easy improvements of
+  early loops can't front-load the peek budget.
 - Hard cap on total validation evaluations (default 10). Every peek at
   validation weakens it as an unbiased signal, so peeks are budgeted, counted,
   and reported.
@@ -199,40 +236,68 @@ Each iteration:
 
 ### Phase D — Finalization (once)
 
-1. Stopping rule fires (budget exhausted, validation plateau over
-   `patience` checkpoints, target score reached, or strategy stop).
-2. Winner = best **validation** score (dev breaks ties). Selecting on
-   validation rather than dev is the core anti-overfitting mechanism.
+1. Stopping rule fires (budget exhausted, validation plateau over `patience`
+   checkpoints — where "improvement" means exceeding the CI band, not any raw
+   uptick — target score reached, or strategy stop).
+2. Winner = the reigning validation champion under **noise-aware selection**:
+   a challenger displaces the champion only when its validation score exceeds
+   the champion's beyond the paired-test noise band (McNemar / paired
+   bootstrap, §8); dev score breaks within-band ties. Selecting on validation
+   rather than dev is the core anti-overfitting mechanism; requiring the
+   noise band blunts the winner's curse of taking a max over noisy peeks.
 3. Shell evaluates the winner on the test set — the only time test examples
    are ever read after splitting. No agent sees test data or test results;
    this is purely a harness computation, run exactly once.
 4. Shell writes `final/`: the solution artifact (directly usable outside the
    framework), plus `report.md` with dev/val/test scores + CIs, the dev–val–test
-   gaps, loop history, validation-peek count, and per-check breakdowns.
+   gaps, loop history, validation-peek count, per-check breakdowns, an
+   explicit note that the winner's validation score is selection-biased (the
+   test score is the honest number), and — for skill/guidance kinds — the
+   pinned eval model version the scores are conditional on.
 
 ## 6. Agent roles and leakage controls
 
 | | Strategy agent | Executor agents | LLM judge |
 |---|---|---|---|
 | Cardinality | 1, logically persistent across loops (via its log; each call is still stateless `claude -p`) | K per loop, concurrent | n samples per (example, judge check) |
-| Sees | Own prior log, dev leaderboard + CIs, dev failure patterns, **aggregate** val scores | Task, current directive, check descriptions, dev-example sample. **Nothing about prior loops.** | Rubric, one candidate output, one expected output |
-| Never sees | Raw val/test examples, per-example val results | Other executors' work, strategy log, any val/test data, prior mistakes | Anything else |
+| Sees | Own prior log (recent loops in full, older compacted), dev leaderboard + CIs, dev failure patterns, the champion's solution content, **aggregate** val scores | Task, current directive (optionally embedding the champion artifact), check descriptions, dev-example sample. **Nothing else about prior loops.** | Rubric, one candidate output, one expected output |
+| Never sees | Raw val/test examples, per-example val results | Other executors' work, strategy log, any val/test data, prior mistakes or per-example failures | Anything else |
 | Produces | JSON `StrategyDecision` | One fenced `solution` block | JSON verdict |
 
-Leakage is enforced twice:
+Prompts are split into **two typed channels**, and the leakage guarantee is
+scoped to the first:
 
-- **By type:** prompt builders accept only `DevExample` values (and aggregate
-  score types). Passing a `ValExample` or `TestExample` is a type error, and
-  there is no function anywhere that renders val/test example content into a
-  prompt string.
-- **By test:** dedicated tests assert that no prompt produced during a
-  simulated full run contains any val/test example content (substring scan
-  over every prompt built with a fake agent runner).
+- **Agent-context prompts** (`AgentContextPrompt`: strategy and executor).
+  The guarantee applies absolutely: no val/test example content, ever.
+- **Evaluation prompts** (`EvalPrompt`: running a skill/guidance candidate on
+  an example, or an LLM judge over one output). These *necessarily* embed the
+  example under evaluation — including val/test examples at checkpoint and
+  finalization time. That is sanctioned: an `EvalPrompt` is built by a
+  separate builder, executed in isolation, and its result returns to the
+  harness as plain data. Nothing from the evaluation channel ever reaches an
+  agent-context prompt except as aggregate scores.
+
+Leakage is then enforced twice:
+
+- **By type:** agent-context prompt builders accept only `DevExample` values
+  (and aggregate score types). Passing a `ValExample` or `TestExample` is a
+  type error; `AgentContextPrompt` and `EvalPrompt` are distinct types, so an
+  evaluation prompt cannot flow into an agent call site.
+- **By test:** dedicated tests assert that no *agent-context* prompt produced
+  during a simulated full run contains any val/test example content
+  (substring scan over every strategy/executor prompt built with a fake agent
+  runner).
 
 The requirement that "each execution agent only sees the current loop's
-strategy" falls out of construction: executor prompts are built from the
+strategy" holds by construction: executor prompts are built from the
 directive alone, and the strategy log is a distinct type that the executor
-prompt builder cannot accept.
+prompt builder cannot accept. The **one sanctioned carry-forward channel** is
+the champion artifact: the strategy agent may embed the current best
+solution's *content* in a directive as a refinement starting point, which is
+what makes incremental convergence possible at all. Solution content only —
+never scores, never prior mistakes, never per-example failures. The
+`ChampionArtifact` type carries nothing else, and a dedicated test asserts
+that rendered directives contain no score or failure text.
 
 ## 7. Solution kinds and how each is evaluated
 
@@ -241,6 +306,14 @@ prompt builder cannot accept.
 | `ScriptSolution` | Executable Python script | Shell runs it in a subprocess (`RunScript` effect): example input on stdin, structured output expected on stdout, timeout + output-size cap. Non-zero exit / timeout → `Errored`. |
 | `SkillSolution` | Skill markdown (e.g. Claude Skill `SKILL.md`) | Shell runs `claude -p --tools ""` with the skill content injected via `--append-system-prompt` and the example input as the prompt; the reply is the raw output to score. |
 | `GuidanceSolution` | Guidance markdown (AGENTS.md / CLAUDE.md style) | Same harness as skills: guidance prepended as system prompt, input as prompt. |
+
+Skill/guidance evaluation and judge calls run in the **evaluation prompt
+channel** (§6) — sanctioned to embed the example under evaluation, whatever
+its split. Two documented caveats for these kinds: (a) evaluation is
+tool-less by design while guidance files in the wild steer tool-using agents,
+so measured transfer to real usage is weaker — noted in the report; (b) a
+candidate's score is a draw from a *stochastic* evaluator, handled
+statistically in §8 and by pinning the eval model version in the manifest.
 
 The executor **output contract** is strict and stated in the prompt: exactly
 one fenced block tagged `solution`, nothing executable outside it. The core
@@ -257,6 +330,9 @@ boundary; OS-level sandboxing is a listed future hardening item (§12).
 This is the "rigor" in RigorLoop; all of it lives in `scoring_calcs.py` as
 pure, individually testable functions.
 
+- **Headline pass rate:** an example passes iff **all** configured checks
+  pass on it (conjunctive); per-check pass rates are always reported
+  alongside so a single strict check can't hide behind the aggregate.
 - **Pass-rate uncertainty:** Wilson score intervals (95%) on every reported
   pass rate — honest at the small n this framework will often see.
 - **Continuous scores** (e.g. judge scores averaged): bootstrap percentile
@@ -266,12 +342,29 @@ pure, individually testable functions.
   for pass/fail checks, paired bootstrap for continuous scores. The
   leaderboard marks differences that are within noise, and the strategy prompt
   states them as "not statistically distinguishable" so the strategy agent
-  doesn't chase noise.
+  doesn't chase noise. With dozens of candidates per run, pairwise 95% flags
+  will include some false positives; there is no formal multiple-comparison
+  correction in v1, and the strategy-prompt language hedges accordingly.
+- **CI-band-gated improvement:** everywhere the protocol asks "did it
+  improve?" — champion switching (§5 D), triggered validation peeks (§5 C),
+  and the plateau stopping rule — improvement means exceeding the paired-test
+  noise band, never a raw score uptick.
+- **Stochastic evaluators:** for skill/guidance kinds (and judge checks),
+  each per-example outcome carries model-sampling variance on top of
+  example-sampling variance. v1 evaluates one sample per example, so CIs for
+  these kinds are flagged in the leaderboard and report as conditional on the
+  pinned eval model and as understating total uncertainty; the manifest pins
+  the model and CLI version so every number is attributable.
+- **Judge self-preference:** the same model family builds and judges
+  solutions — a documented upward bias that deterministic checks don't share.
+  Per-role models (a different judge model) are the post-v1 answer.
 - **Overfitting signal:** dev–val gap tracked per checkpoint and plotted in
   the final report; a widening gap triggers a warning in the strategy context.
-- **Selection & reporting discipline:** selection on validation, never dev;
-  test evaluated once; validation-peek count reported; power warnings at
-  intake when splits are too small to support the configured target margins.
+- **Selection & reporting discipline:** noise-aware selection on validation,
+  never dev; test evaluated once; the winner's validation score carries an
+  explicit selection-bias caveat in the report (test is the honest number);
+  validation-peek count reported; power warnings at intake when splits are
+  too small to support the configured target margins.
 
 ## 9. Configuration and CLI
 
@@ -287,14 +380,17 @@ ratios = [0.6, 0.2, 0.2]
 seed   = 17
 
 [loop]
-max_loops            = 12
-executors_per_loop   = 4
-dev_examples_in_prompt = 30
+max_loops              = 12
+executors_per_loop     = 4
+dev_examples_in_prompt = 30          # resampled every loop (seed + loop index)
+max_consecutive_eval_failures = 5    # short-circuit a hanging candidate's eval
+strategy_full_detail_loops    = 4    # older loops appear as compact summaries
 
 [validation]
 val_every  = 3
 max_peeks  = 10
-patience   = 3                       # checkpoints without improvement → stop
+min_loops_between_peeks = 2          # damps triggered-peek front-loading
+patience   = 2                       # checkpoints without CI-band improvement → stop
 target_pass_rate = 0.95              # optional early-success stop
 
 [agents]
@@ -315,7 +411,9 @@ CLI (argparse, in `shell/cli.py`):
 
 - `rigorloop init` — scaffold `rigorloop.toml`, `task.md`, an example JSONL.
 - `rigorloop check` — parse config/examples, print split sizes + power
-  warnings, estimate agent-call budget. No tokens spent.
+  warnings, estimate the agent-call budget **kind-aware**: for skill/guidance
+  kinds, candidate evaluation itself costs one `claude` call per dev example
+  per candidate — the dominant cost, ahead of judge calls. No tokens spent.
 - `rigorloop run [--resume RUN_ID]` — execute the protocol.
 - `rigorloop report RUN_ID` — re-render the report from persisted artifacts.
 
@@ -324,6 +422,7 @@ CLI (argparse, in `shell/cli.py`):
 ```
 runs/<run_id>/
 ├── manifest.json            # config snapshot + SplitManifest (hashes)
+│                            # + pinned eval model & claude CLI version
 ├── splits/{dev,val,test}.jsonl
 ├── strategy_log.jsonl       # append-only; the strategy agent's memory
 ├── leaderboard.json
@@ -347,9 +446,12 @@ on resume prevents dataset drift mid-run.
   every check evaluator; Wilson/bootstrap/McNemar math against known values;
   strategy & executor reply parsers (valid, malformed, adversarial);
   cadence/stopping rules; prompt builders (golden-file tests).
-- **Leakage tests (first-class):** the §6 substring-scan test over all prompts
-  from a simulated run; a test asserting the test set is read at most once;
-  type-level guards exercised.
+- **Leakage tests (first-class):** the §6 substring-scan test over all
+  *agent-context* prompts from a simulated run (evaluation-channel prompts
+  are exempt by design); a test that rendered directives carry champion
+  solution content only — no score or failure text; a test asserting the test
+  set is read at most once; type-level guards for both prompt channels
+  exercised.
 - **Shell integration (thin):** `agent_calls` against a stub executable that
   mimics `claude -p --output-format json` (success, timeout, garbage output);
   script sandbox timeout/output-cap behavior; run-dir round-trip + resume.
@@ -367,7 +469,8 @@ Each phase ends green: tests pass, `mypy --strict` clean.
 1. **Scaffolding** — `pyproject.toml`, package layout, CI-ready test harness;
    `core/types.py` (`Result`, `Option`, first domain ADTs).
    *Accept:* `pytest` and `mypy --strict` run clean on the skeleton.
-2. **Dataset core** — example parsing, splitting, manifests, power warnings.
+2. **Dataset core** — example parsing, exact-duplicate detection, splitting,
+   manifests, power warnings.
    *Accept:* property-style tests for determinism/disjointness pass.
 3. **Scoring core** — deterministic check evaluators, aggregation, Wilson +
    bootstrap + McNemar.
@@ -381,19 +484,25 @@ Each phase ends green: tests pass, `mypy --strict` clean.
    parsing, candidate materialization/execution, dev scoring; one loop with a
    hard-coded strategy directive.
    *Accept:* fake-agent E2E produces a scored leaderboard.
-6. **Strategy loop** — strategy prompts/parsing, strategy log, multi-loop
-   orchestration, leakage tests.
-   *Accept:* multi-loop fake-agent E2E; leakage scan test green.
-7. **Validation & stopping** — checkpoints, peek budget, plateau/target
-   stopping, finalization with one-shot test evaluation and `report.md`.
+6. **Strategy loop** — strategy prompts/parsing, strategy log with windowed
+   compaction (full detail last N loops), champion carry-forward in
+   directives, the strategy fallback path, multi-loop orchestration, leakage
+   tests for both prompt channels.
+   *Accept:* multi-loop fake-agent E2E; leakage scan test green; a refine
+   directive demonstrably embeds the champion artifact.
+7. **Validation & stopping** — checkpoints, peek budget + gap damping,
+   CI-band plateau/target stopping, noise-aware winner selection,
+   finalization with one-shot test evaluation and `report.md` (including the
+   selection-bias caveat).
    *Accept:* E2E run yields full report; test set touched exactly once.
 8. **Remaining kinds & judge checks** — `LlmJudge` (n-sample majority),
    `SkillSolution`/`GuidanceSolution` evaluation harness, `CustomPython`
    checks.
    *Accept:* per-kind E2E with fake agents.
 9. **Hardening & docs** — resume, cost/budget accounting surfaced in `check`
-   and the report, README + worked example project, live smoke test against
-   the real `claude` CLI on a toy task.
+   and the report, README + worked example project (the README must carry the
+   cross-run test-reuse warning: re-running after seeing a test score burns
+   the holdout), live smoke test against the real `claude` CLI on a toy task.
 
 Future (post-v1) items: OS-level sandboxing for generated code, stratified
 splitting, adaptive validation cadence, HTML report.
@@ -403,9 +512,11 @@ splitting, adaptive validation cadence, HTML report.
 | Risk | Mitigation |
 |---|---|
 | Malformed agent replies break loops | Strict output contracts; `Result`-returning parsers; one reformat retry; failed candidates recorded, never fatal. |
-| Overfitting to dev despite the design | Selection on validation; capped peeks; dev–val gap surfaced to strategy agent and report; test untouched until the end. |
+| Overfitting to dev despite the design | Noise-aware selection on validation; capped + gap-damped peeks; dev–val gap surfaced to strategy agent and report; selection-bias caveat in report; test untouched until the end. |
+| Test set burned by repeated runs | Per-run guarantee only; README warns loudly that iterating after seeing a test score requires fresh holdout examples. |
+| Loops plateau because executors regenerate from scratch | Champion artifact carried forward: strategy agent may embed the best solution's content in a refine directive (content only — never mistakes or per-example failures). |
 | Small datasets → meaningless stats | Power warnings at `check` time; CIs on every number; leaderboard marks statistically indistinguishable differences. |
-| Token/cost blowout | `rigorloop check` pre-run budget estimate; per-run call ceiling; loop and executor caps in config. |
+| Token/cost blowout | Kind-aware `rigorloop check` pre-run budget estimate; per-candidate eval short-circuiting; per-run call ceiling; loop and executor caps in config. |
 | Untrusted generated code | Timeouts, output caps, scratch dirs; documented as not a security boundary; OS sandboxing on the roadmap. |
 | LLM nondeterminism muddies comparisons | n-sample judge voting; paired statistical tests; reproducible seeds for everything the harness controls. |
 | `claude` CLI flag drift | All flags isolated in one shell function in `agent_calls.py`; stub-CLI tests define the expected envelope. |
@@ -417,6 +528,8 @@ splitting, adaptive validation cadence, HTML report.
    (JSON-encoded when structured). Native multi-field examples later?
 3. **Model choice**: single configured model for all roles in v1; per-role
    models (cheaper executors, stronger strategist) is an easy follow-on.
-4. **Judge budget**: `LlmJudge` on large dev sets is the main cost driver —
-   is an n-sample majority of 3 per example acceptable, or should judges score
-   only failures of deterministic checks first (tiered checking)?
+4. **Judge budget**: `LlmJudge` multiplies per-example evaluation cost by
+   `n_samples` (and for skill/guidance kinds it stacks on top of the already
+   call-per-example evaluation) — is an n-sample majority of 3 per example
+   acceptable, or should judges score only failures of deterministic checks
+   first (tiered checking)?

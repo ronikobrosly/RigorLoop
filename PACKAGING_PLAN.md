@@ -85,7 +85,7 @@ dev = [
   "pytest>=8",
   "pytest-cov>=5",
   "hypothesis>=6",        # property-style tests for splitting/scoring math
-  "mypy>=1.14",
+  "mypy>=1.16",           # the exhaustive-match error code (§4) needs ≥1.16
   "ruff>=0.8",
   "pre-commit>=4",
 ]
