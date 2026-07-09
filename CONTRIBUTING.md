@@ -72,7 +72,33 @@ Two invariants are non-negotiable and covered by dedicated tests in
 
 ## Releases (maintainer)
 
-1. Ensure `main` is green and `CHANGELOG.md` has the new section.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Approve the `pypi` environment deployment.
-4. Verify `pip install rigorloop==X.Y.Z` in a scratch venv.
+The git tag **is** the version: `hatch-vcs` derives it from the latest
+`vX.Y.Z` tag, so there is no version number to bump in any file. The only file
+you edit for a release is `CHANGELOG.md`; pushing the tag does the rest.
+
+1. Land the change the normal way — branch, PR, `just check` green, add an
+   entry under `## [Unreleased]` in `CHANGELOG.md`, merge to `main`.
+2. On `main` (`git checkout main && git pull`), promote the changelog: rename
+   `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`
+   above it, commit, and push. The tag will point at this commit, so `main`
+   must be green first (branch protection requires `ci-ok`).
+3. Tag and push — this triggers `release.yml`:
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+4. Approve the `pypi` environment deployment when prompted (the publish job is
+   gated on manual approval). The workflow then rebuilds from the tag,
+   publishes to PyPI via OIDC Trusted Publishing (no token), and cuts a GitHub
+   Release with generated notes and the built artifacts.
+5. Verify `pip install rigorloop==X.Y.Z` in a scratch venv, then
+   `rigorloop --version`.
+
+Version choice while `0.x`: **patch** (`v0.1.1`) = fixes only; **minor**
+(`v0.2.0`) = features or breaking changes (call breakage out in the changelog);
+`v1.0.0` when `rigorloop.toml`, the CLI, and the run-directory format are
+declared stable.
+
+A version publishes to PyPI exactly once — never re-push or edit a tag. If a
+release fails partway, fix forward with a new patch tag rather than reusing the
+old one. To rehearse the full pipeline first, push a prerelease tag
+(e.g. `v0.2.0rc1`) against TestPyPI.
