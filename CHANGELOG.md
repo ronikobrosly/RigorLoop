@@ -4,7 +4,30 @@ All notable changes to this project are documented in this file, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/) (`0.x`: minor = features/breaking, patch = fixes).
 
-## [Unreleased]
+## [v0.1.1]
+
+Documentation and repository-hygiene only; no changes to the `rigorloop`
+package or its behavior.
+
+### Added
+
+- `AGENTS.md`: an orientation guide for coding agents, describing the package,
+  the functional-core / imperative-shell architecture (pointing at
+  `CODING_STYLE.md` as the binding rules), and a full annotated folder tree.
+
+### Changed
+
+- `CONTRIBUTING.md`: expanded the maintainer *Releases* section to document the
+  tag-driven flow — `hatch-vcs` derives the version from the `vX.Y.Z` tag (no
+  file to bump), the `[Unreleased]` → `[X.Y.Z]` changelog promotion, OIDC
+  Trusted Publishing, prerelease/TestPyPI rehearsal, and the "publish a tag
+  exactly once, fix forward" rule.
+
+### Removed
+
+- Internal planning docs `PLAN.md`, `PACKAGING_PLAN.md`, and `CLAUDE.md` removed
+  from the repository (superseded by the shipped implementation and the
+  README/CONTRIBUTING docs).
 
 ## [0.1.0] - 2026-07-08
 
