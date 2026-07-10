@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/) (`0.x`: minor = features/breaking, patch = fixes).
 
-## [Unreleased]
+## [v0.2.0] - 2026-07-10
 
 ### Changed
 
@@ -38,7 +38,7 @@ All notable changes to this project are documented in this file, following
     the search and selected the winner (the untouched test set remains the
     honest number).
 
-## [v0.1.1]
+## [v0.1.1] - 2026-07-9
 
 Documentation and repository-hygiene only; no changes to the `rigorloop`
 package or its behavior.

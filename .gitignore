@@ -221,3 +221,5 @@ __marimo__/
 src/rigorloop/_version.py
 runs/
 .uv-cache/
+stage_markdowns/
+stage_markdowns
