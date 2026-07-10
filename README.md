@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.webp" alt="RigorLoop logo" width="400">
+  <img src="logo.webp" alt="RigorLoop logo" width="800">
 </p>
 
 # RigorLoop
