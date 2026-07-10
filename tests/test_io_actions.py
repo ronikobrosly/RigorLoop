@@ -52,7 +52,9 @@ SCORE = CandidateScore(
 
 
 def full_state() -> RunState:
-    entry = LeaderboardEntry("cand-1", 1, ScriptSolution(), "print(1)", SCORE)
+    entry = LeaderboardEntry(
+        "cand-1", 1, ScriptSolution(), "print(1)", SCORE, based_on_champion=True
+    )
     directive = Directive(
         "L1-d1", "summary", "instructions", Some(ChampionArtifact("c0", SkillSolution(), "doc"))
     )
@@ -110,6 +112,48 @@ class TestRoundTrips:
     def test_kind_names(self) -> None:
         for kind in (ScriptSolution(), SkillSolution(), GuidanceSolution()):
             assert io_actions.kind_from_name(io_actions.kind_to_name(kind)) == kind
+
+    def test_pre_cohort_state_reads_with_default_lineage_flag(self) -> None:
+        """State persisted before validation cohorts existed has no
+        based_on_champion key; it must load as False, not crash."""
+        data = io_actions.entry_to_json(full_state().leaderboard[0])
+        del data["based_on_champion"]
+        restored = io_actions.state_from_json(
+            io_actions.state_to_json(full_state()) | {"leaderboard": [data]}
+        )
+        assert restored.leaderboard[0].based_on_champion is False
+
+    def test_failure_samples(self) -> None:
+        from rigorloop.core.types import DevExample, FailureSample
+
+        sample = FailureSample(
+            dev_example=DevExample(Example("e1", "the input", "the expected")),
+            actual_output="the wrong output",
+            failed_checks=("exact_match", "json_equality"),
+        )
+        assert io_actions.failure_sample_from_json(io_actions.failure_sample_to_json(sample)) == (
+            sample
+        )
+
+
+class TestFailureSampleFiles:
+    def test_write_and_read(self, tmp_path: Path) -> None:
+        from rigorloop.core.types import DevExample, FailureSample
+
+        samples = (FailureSample(DevExample(Example("e1", "in", "out")), "bad", ("exact_match",)),)
+        path = tmp_path / "cand" / "failure_samples.json"
+        io_actions.write_failure_samples(path, samples)
+        assert io_actions.read_failure_samples(path) == samples
+
+    def test_missing_file_reads_as_no_samples(self, tmp_path: Path) -> None:
+        assert io_actions.read_failure_samples(tmp_path / "absent.json") == ()
+
+    def test_corrupt_file_reads_as_no_samples(self, tmp_path: Path) -> None:
+        path = tmp_path / "corrupt.json"
+        path.write_text("not json at all")
+        assert io_actions.read_failure_samples(path) == ()
+        path.write_text('{"not": "a list"}')
+        assert io_actions.read_failure_samples(path) == ()
 
 
 class TestFilePrimitives:

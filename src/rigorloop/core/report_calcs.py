@@ -37,7 +37,10 @@ def stop_reason_label(reason: StopReason) -> str:
                 "improvement beyond the CI band"
             )
         case TargetReached(pass_rate):
-            return f"target pass rate reached ({pass_rate:.1%} on validation)"
+            return (
+                f"target pass rate reached ({pass_rate:.1%} on validation; "
+                "lower confidence bound cleared the target)"
+            )
         case StrategyRequestedStop(why):
             return f"strategy agent requested stop: {why}"
         case StrategyUnresponsive(fallbacks):
@@ -179,9 +182,10 @@ def render_report(
         f"{_score_line('test', test_score)}\n\n"
         f"Generalization gaps: dev→val {dev_rate - val_rate:+.1%}, "
         f"val→test {val_rate - test_rate:+.1%}, dev→test {dev_rate - test_rate:+.1%}\n\n"
-        "> **Selection-bias caveat:** the winner was *selected* on its validation "
-        "score, so that number is optimistically biased. The test score — computed "
-        "exactly once, on examples no agent ever saw — is the honest number.\n"
+        "> **Selection-bias caveat:** validation scores both steered the search "
+        "between loops and *selected* this winner, so the validation number is "
+        "optimistically biased. The test score — computed exactly once, on examples "
+        "no agent ever saw — is the honest number.\n"
         f"{stochastic_note}\n"
         "## Per-check breakdown on the test set\n\n"
         "| Check | Passes |\n|---|---|\n"

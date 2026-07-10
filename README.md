@@ -1,6 +1,6 @@
 # RigorLoop
 
-A statistically-sound agentic build framework. You give it a task description,
+A statistically-sound agentic loop-engineering framework. You give it a task description,
 a pile of gold-standard input/output examples, and a set of checks; it runs
 agentic loops (a strategy agent directing concurrent executor agents) that
 iteratively build and refine a solution — and it evaluates that solution the
@@ -126,9 +126,12 @@ dev_examples_in_prompt = 30        # examples each builder sees (resampled per l
 
 [validation]
 val_every        = 3               # scheduled validation checkpoint cadence
-max_peeks        = 10              # total validation evaluations allowed per run
-patience         = 2               # checkpoints without real improvement => stop
-target_pass_rate = 0.95            # optional: stop early on hitting this on validation
+max_peeks        = 10              # total candidate validation evaluations per run
+cohort_size      = 2               # candidates validated per checkpoint: top dev
+                                   # scorers + one diverse (non-champion-based) slot
+patience         = 2               # checkpoint loops without real improvement => stop
+target_pass_rate = 0.95            # optional: stop early once the validation score's
+                                   # lower confidence bound clears this
 
 [agents]
 model     = "claude-sonnet-5"      # model for all agent roles
@@ -144,9 +147,12 @@ The knobs that matter most in practice:
   executed locally (cheap); skills/guidance are evaluated by running a model
   per example (expensive — check the budget estimate).
 - **`max_loops` × `executors_per_loop`** — your primary cost lever.
-- **`max_peeks` / `patience`** — how often the loop is allowed to look at the
-  validation set, and how long it tolerates no genuine (beyond-noise)
-  improvement before stopping.
+- **`max_peeks` / `cohort_size` / `patience`** — how many candidate evaluations
+  the loop may spend on the validation set, how many candidates each checkpoint
+  compares, and how long the loop tolerates no genuine (beyond-noise)
+  improvement before stopping. For expensive artifact kinds (skill/guidance),
+  every validation evaluation is a model call per example — keep `cohort_size`
+  small and watch the budget estimate.
 - **`seed`** — makes the split reproducible; changing it reshuffles which
   examples land in the holdout.
 
@@ -156,11 +162,21 @@ The knobs that matter most in practice:
   resumed run can never quietly reshuffle it.
 - The building agents only ever see **dev** examples. Validation scores reach
   the strategy agent only as aggregates; test examples reach no agent, ever.
+- The artifact each loop refines is the **validation champion** — the
+  candidate with the best evidence of generalizing — not the raw dev leader.
+  Each checkpoint validates a precommitted cohort (the top unvalidated dev
+  candidates plus one diverse alternative not built on the champion), so a
+  candidate that is slightly worse on dev but generalizes better still gets
+  discovered. The dev leaderboard is a diagnostic, not a selection rule.
 - "Improved" always means *beyond the statistical noise band* (paired tests),
-  not just a higher number — so the loop doesn't chase luck.
-- The validation set (capped, counted peeks) picks the winner; the **test set
-  is evaluated exactly once**, at the very end, and that is the number to
-  report.
+  not just a higher number — so the loop doesn't chase luck. Early stopping on
+  `target_pass_rate` likewise requires the validation score's *lower
+  confidence bound* to clear the target, not a lucky point estimate.
+- The validation set (capped, counted peeks) steers the search and picks the
+  winner — which is ordinary model selection, but it means the winner's
+  validation score is optimistically biased. That is exactly what the **test
+  set** is for: it is evaluated **exactly once**, at the very end, and that is
+  the number to report.
 
 ## ⚠️ The final test set is only honest once
 
@@ -188,6 +204,87 @@ Related caveat: RigorLoop deduplicates *exact* duplicate inputs before splitting
 A complete toy project (contact-card text → JSON) lives in
 [`examples/contact-cards/`](examples/contact-cards/) — it is exactly what
 `rigorloop init` scaffolds.
+
+
+## FAQ
+
+### When should I use this?
+
+When all three of these are true:
+
+1. **The task is a transformation with a checkable right answer** — messy
+   text in, structured output out (extraction, normalization, tagging,
+   classification-with-a-format) — and "correct" can be expressed as checks.
+2. **You have, or can collect, a real pile of gold examples** — dozens at
+   minimum, ideally 100+ — that are representative of the inputs you'll see
+   in production.
+3. **What you care about is performance on *new* inputs**, and you need a
+   score you can quote without an asterisk.
+
+If any of these is false, don't reach for RigorLoop. No examples means there
+is nothing to split and nothing to measure honestly. And if the goal is a
+deterministic script that passes a fixed handful of unit tests, a single
+coding-agent session is cheaper and better — see
+[When to use it (and when not to)](#when-to-use-it-and-when-not-to).
+
+### Can't standalone frontier agents do this? Why should I use this?
+
+A frontier agent can absolutely write the solution — RigorLoop's executors
+*are* frontier agents doing exactly that. What a standalone session can't
+give you is a score you can trust. Hand an agent your examples and ask it to
+iterate until things pass, and it grades its own homework: "98% accurate"
+means 98% on the very examples it tuned against, which says little about the
+next thousand inputs. There is no held-out data, no accounting of how many
+times it peeked, and no way to tell a real improvement from a lucky one.
+
+RigorLoop is the harness around those agents that supplies the missing
+discipline:
+
+- **a dev / validation / test split**, enforced up front — building agents
+  only ever see dev examples, and the test set is scored exactly once, at
+  the end;
+- **statistics instead of vibes** — confidence intervals on every score,
+  paired tests so "improved" means beyond the noise band, and a counted,
+  capped budget of validation peeks;
+- **search instead of one shot** — a strategy agent directing concurrent
+  executors across many loops, keeping the candidate with the best evidence
+  of *generalizing* rather than the one that got luckiest on dev.
+
+You could rebuild all of that by hand around a chat session. RigorLoop is
+that machinery, prebuilt and honest by construction.
+
+### What do I do if the solution the loop converges to still isn't accurate enough?
+
+First, believe the number — that's the point of the tool. An honest 74% is
+worth more than the inflated score a self-graded loop would have reported,
+because it tells you the problem isn't solved yet. Then work through this
+list, roughly cheapest first:
+
+1. **Read `report.md`.** The per-check breakdown and loop history usually
+   show *how* it fails: one check dominating the failures, scores plateauing
+   after a couple of loops, or confidence intervals so wide the run couldn't
+   tell candidates apart.
+2. **Check your checks.** An `exact_match` where you meant
+   `normalized_match` or `json_equality`, or a vague `llm_judge` rubric, can
+   make a good solution look bad.
+3. **Sharpen `task.md`.** Failing examples often reveal rules and edge cases
+   the description never stated. Spell them out.
+4. **Add more — and more representative — examples.** Small sets cap what
+   the loop can even detect (heed the power warnings from
+   `rigorloop check`), and noisy labels cap the ceiling no solution can
+   exceed.
+5. **Raise the budget.** More `max_loops`, `executors_per_loop`, and
+   `max_peeks` buy a wider search; a stronger model in `[agents]` buys
+   better builders.
+6. **Reconsider `solution_kind`.** A deterministic script may be too rigid
+   for a fuzzy task; a `skill` or `guidance` artifact puts a model in the
+   loop at inference time (at a much higher evaluation cost).
+7. **Decompose the task.** Two simple transformations chained often beat one
+   complicated one.
+
+One caution: the moment you iterate *after* seeing a test score, that test
+set is spent — bring fresh, never-before-used examples for the next run's
+holdout (see "The final test set is only honest once" above).
 
 ## Contributing & development
 

@@ -287,6 +287,9 @@ class LeaderboardEntry:
     kind: SolutionKind
     content: str
     score: CandidateScore
+    # Whether the directive that produced this candidate embedded the champion
+    # artifact; validation-cohort selection uses it as its diversity signal.
+    based_on_champion: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -440,11 +443,13 @@ class StrategyContext:
     leaderboard_lines: tuple[str, ...]
     failure_samples: tuple[FailureSample, ...]
     champion: Option[ChampionArtifact]
-    champion_dev_line: Option[str]
+    champion_line: Option[str]
+    dev_leader_line: Option[str]
     val_lines: tuple[str, ...]
     dev_val_gap_warning: Option[str]
     peeks_used: int
     max_peeks: int
+    cohort_size: int
     dev_subset_note: str
 
 
@@ -631,6 +636,7 @@ class ValidationConfig:
     min_loops_between_peeks: int
     patience: int
     target_pass_rate: Option[float]
+    cohort_size: int
 
 
 @dataclass(frozen=True, slots=True)

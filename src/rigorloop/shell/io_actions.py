@@ -18,6 +18,7 @@ from rigorloop.core.types import (
     ChampionArtifact,
     CheckOutcome,
     CheckPassRate,
+    DevExample,
     Directive,
     Errored,
     Example,
@@ -25,6 +26,7 @@ from rigorloop.core.types import (
     ExecutionOk,
     ExecutionResult,
     Failed,
+    FailureSample,
     GuidanceSolution,
     JsonValue,
     LeaderboardEntry,
@@ -215,6 +217,7 @@ def entry_to_json(entry: LeaderboardEntry) -> dict[str, JsonValue]:
         "kind": kind_to_name(entry.kind),
         "content": entry.content,
         "score": score_to_json(entry.score),
+        "based_on_champion": entry.based_on_champion,
     }
 
 
@@ -226,6 +229,8 @@ def _entry_from_json(data: dict[str, JsonValue]) -> LeaderboardEntry:
         kind=kind_from_name(str(data["kind"])),
         content=str(data["content"]),
         score=score_from_json(score if isinstance(score, dict) else {}),
+        # Absent in state persisted before validation cohorts existed.
+        based_on_champion=bool(data.get("based_on_champion", False)),
     )
 
 
@@ -304,6 +309,46 @@ def log_entry_from_json(data: dict[str, JsonValue]) -> StrategyLogEntry:
         val_summary=Some(raw_val) if isinstance(raw_val, str) else NOTHING,
         fallback=bool(data["fallback"]),
     )
+
+
+def failure_sample_to_json(sample: FailureSample) -> dict[str, JsonValue]:
+    return {
+        "example": example_to_json(sample.dev_example.example),
+        "actual_output": sample.actual_output,
+        "failed_checks": list(sample.failed_checks),
+    }
+
+
+def failure_sample_from_json(data: dict[str, JsonValue]) -> FailureSample:
+    raw_example = data["example"]
+    raw_checks = data["failed_checks"]
+    return FailureSample(
+        dev_example=DevExample(
+            example_from_json(raw_example if isinstance(raw_example, dict) else {})
+        ),
+        actual_output=str(data["actual_output"]),
+        failed_checks=(tuple(str(c) for c in raw_checks) if isinstance(raw_checks, list) else ()),
+    )
+
+
+def write_failure_samples(path: Path, samples: tuple[FailureSample, ...]) -> None:
+    """Persist a candidate's dev failure samples keyed by its candidate dir,
+    so champion diagnostics survive non-improving loops and resume."""
+    write_json(path, [failure_sample_to_json(s) for s in samples])
+
+
+def read_failure_samples(path: Path) -> tuple[FailureSample, ...]:
+    """Missing or unreadable files read as no samples: diagnostics are
+    best-effort and must never block a run or a resume."""
+    if not path.is_file():
+        return ()
+    try:
+        loaded = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(loaded, list):
+        return ()
+    return tuple(failure_sample_from_json(d) for d in loaded if isinstance(d, dict))
 
 
 def validated_to_json(validated: ValidatedCandidate) -> dict[str, JsonValue]:

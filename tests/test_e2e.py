@@ -5,11 +5,15 @@ executing in-process with deterministic assertions on the artifacts."""
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from rigorloop.core import dataset_calcs
 from rigorloop.core.strategy_calcs import initial_state
 from rigorloop.core.types import (
     NOTHING,
@@ -20,6 +24,7 @@ from rigorloop.core.types import (
     Ok,
     Result,
     Some,
+    SplitRatios,
 )
 from rigorloop.shell import io_actions
 from rigorloop.shell.cli import execute_run
@@ -31,6 +36,7 @@ from tests.conftest import (
     scripted_agent,
     solution_block,
     strategy_reply,
+    toy_examples,
 )
 
 pytestmark = pytest.mark.e2e
@@ -91,6 +97,124 @@ class TestFullScriptRun:
         assert (loop1 / "candidates" / "cand-L1-d1" / "solution.py").is_file()
         assert (loop1 / "candidates" / "cand-L1-d1" / "scores.json").is_file()
         assert (loop1 / "candidates" / "cand-L1-d1" / "outputs.jsonl").is_file()
+
+
+@dataclass(frozen=True, slots=True)
+class SteeringScenario:
+    """A deterministic overfit-vs-generalizer setup: candidate A aces dev but
+    fails half of validation (and half of test); candidate B drops one dev
+    example but generalizes perfectly."""
+
+    agent: Callable[[AgentTextRequest], Result[str, AgentCallError]]
+    overfit_content: str
+    general_content: str
+
+
+def make_steering_scenario() -> SteeringScenario:
+    split = dataset_calcs.split_examples(toy_examples(), SplitRatios(0.6, 0.2, 0.2), seed=17)
+    assert isinstance(split, Ok)
+    val_inputs = tuple(v.example.input_text for v in split.value.val)
+    test_inputs = tuple(t.example.input_text for t in split.value.test)
+    dev_inputs = tuple(d.example.input_text for d in split.value.dev)
+    overfit_content = "# MODE=UPPER\n" + "\n".join(
+        f"# FAIL_ON:{text}" for text in (*val_inputs[:3], *test_inputs[:3])
+    )
+    general_content = f"# MODE=UPPER\n# FAIL_ON:{dev_inputs[0]}"
+
+    def agent(request: AgentTextRequest) -> Result[str, AgentCallError]:
+        prompt = request.user_prompt
+        if "You are the strategy agent" in prompt:
+            if loops_completed_in(prompt) == 0:
+                return Ok(strategy_reply(("Build OVERFIT", False), ("Build GENERAL", False)))
+            return Ok(strategy_reply(("Refine the champion", True)))
+        if "You are an executor agent" in prompt:
+            if "Build OVERFIT" in prompt:
+                return Ok(solution_block(overfit_content))
+            if "Build GENERAL" in prompt:
+                return Ok(solution_block(general_content))
+            # Refinement directive: echo the embedded champion back unchanged.
+            match = re.search(r"<current-solution>\n(.*)\n</current-solution>", prompt, re.DOTALL)
+            assert match is not None, "refinement directive did not embed a base artifact"
+            return Ok(solution_block(match.group(1)))
+        return Err(CallFailed(f"unexpected prompt: {prompt[:80]}"))
+
+    return SteeringScenario(agent, overfit_content, general_content)
+
+
+class TestValidationSteersTheSearch:
+    """The selection-dynamics guarantee: a candidate that wins raw dev but
+    generalizes badly must not monopolize validation, the base artifact, or
+    the final selection."""
+
+    def test_lower_dev_generalizer_wins_validation_and_test(self, tmp_path: Path) -> None:
+        scenario = make_steering_scenario()
+        recorder = Recorder(agent_handler=scenario.agent)
+        assert run_project(tmp_path, recorder) == 0
+
+        run_path = tmp_path / "runs" / "run-test"
+        results = json.loads((run_path / "final" / "test_results.json").read_text())
+        # cand-L1-d1 is the overfit dev leader; cand-L1-d2 wins on validation.
+        assert results["winner"]["candidate_id"] == "cand-L1-d2"
+        assert results["test_score"]["pass_rate"] == 1.0
+        state = json.loads((run_path / "state.json").read_text())
+        leaderboard_first = state["leaderboard"][0]
+        assert leaderboard_first["candidate_id"] == "cand-L1-d1"  # still the raw dev leader
+
+    def test_overfit_dev_leader_is_validated_but_not_the_base_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        scenario = make_steering_scenario()
+        recorder = Recorder(agent_handler=scenario.agent)
+        assert run_project(tmp_path, recorder) == 0
+
+        # Loop 1's cohort validated BOTH candidates, dev leader included.
+        run_path = tmp_path / "runs" / "run-test"
+        state = json.loads((run_path / "state.json").read_text())
+        loop1_checkpoints = [c for c in state["checkpoints"] if c["loop_index"] == 1]
+        assert {c["candidate_id"] for c in loop1_checkpoints} == {"cand-L1-d1", "cand-L1-d2"}
+
+        # Every refinement directive embedded the validation champion's
+        # artifact, never the overfit dev leader's.
+        refinement_prompts = [
+            r.user_prompt
+            for r in recorder.agent_requests
+            if "You are an executor agent" in r.user_prompt
+            and "<current-solution>" in r.user_prompt
+        ]
+        assert refinement_prompts
+        for prompt in refinement_prompts:
+            assert scenario.general_content in prompt
+            assert scenario.overfit_content not in prompt
+
+    def test_strategy_prompt_labels_champion_and_diagnostic_dev_leader(
+        self, tmp_path: Path
+    ) -> None:
+        scenario = make_steering_scenario()
+        recorder = Recorder(agent_handler=scenario.agent)
+        assert run_project(tmp_path, recorder) == 0
+
+        loop2_prompt = (
+            tmp_path / "runs" / "run-test" / "loops" / "2" / "strategy_prompt.md"
+        ).read_text()
+        assert "champion by validation score" in loop2_prompt
+        assert scenario.general_content in loop2_prompt
+        assert scenario.overfit_content not in loop2_prompt
+        assert "# Diagnostic dev leader\ncand-L1-d1" in loop2_prompt
+        assert "likely overfit" in loop2_prompt  # dev 100% vs validation 50%
+
+    def test_champion_failure_samples_survive_non_improving_loops(self, tmp_path: Path) -> None:
+        """The champion came from loop 1; later loops must still show its
+        concrete dev failures to the strategy agent."""
+        scenario = make_steering_scenario()
+        recorder = Recorder(agent_handler=scenario.agent)
+        assert run_project(tmp_path, recorder) == 0
+
+        run_path = tmp_path / "runs" / "run-test"
+        last_loop = max(int(p.name) for p in (run_path / "loops").iterdir() if p.name.isdigit())
+        assert last_loop >= 3
+        final_prompt = (run_path / "loops" / str(last_loop) / "strategy_prompt.md").read_text()
+        assert "WRONG OUTPUT" in final_prompt  # the champion's failing dev example
+        assert "(none collected)" not in final_prompt
 
 
 class TestStrategyStop:
@@ -204,6 +328,14 @@ class TestResume:
         final_state = json.loads((tmp_path / "runs" / "run-test" / "state.json").read_text())
         assert final_state["loops_completed"] == 4
         assert (tmp_path / "runs" / "run-test" / "final" / "report.md").is_file()
+
+        # The champion's dev failure diagnostics are reloaded from disk, so
+        # the first post-resume strategy prompt still shows them.
+        resumed_prompt = (
+            tmp_path / "runs" / "run-test" / "loops" / "2" / "strategy_prompt.md"
+        ).read_text()
+        assert "(none collected)" not in resumed_prompt
+        assert "Failed checks: exact_match" in resumed_prompt
 
     def test_resume_refuses_dataset_drift(self, tmp_path: Path) -> None:
         project = make_project(tmp_path)

@@ -103,24 +103,28 @@ class TestStrategyPrompt:
             LeaderboardEntry,
             RunState,
             ValCheckpoint,
+            ValidatedCandidate,
         )
 
         parsed = config_calcs.parse_config(BASE_CONFIG)
         assert isinstance(parsed, Ok)
-        low, high = wilson_interval(2, 4)
-        board_entry = LeaderboardEntry(
-            "best",
-            1,
-            ScriptSolution(),
-            "content",
-            CandidateScore(4, 2, 0.5, low, high, (), (True, True, False, False), False),
-        )
+
+        def make_score(vector: tuple[bool, ...]) -> CandidateScore:
+            low, high = wilson_interval(sum(vector), len(vector))
+            return CandidateScore(
+                len(vector), sum(vector), sum(vector) / len(vector), low, high, (), vector, False
+            )
+
+        dev_score = make_score((True, True, True, False))  # 75% on dev
+        val_score = make_score((True, False, False, False))  # 25% on validation
+        board_entry = LeaderboardEntry("best", 1, ScriptSolution(), "content", dev_score)
+        champion = ValidatedCandidate("best", ScriptSolution(), "content", dev_score, val_score)
         state = RunState(
             1,
             (board_entry,),
             (),
-            NOTHING,
-            (ValCheckpoint(1, "best", 0.9, 0.5, True),),
+            Some(champion),
+            (ValCheckpoint(1, "best", 0.75, 0.25, True),),
             1,
             Some(1),
             0,
@@ -130,6 +134,18 @@ class TestStrategyPrompt:
         )
         prompt = prompt_calcs.build_strategy_prompt(context)
         assert "overfitting" in prompt.text
+        assert "champion by validation score" in prompt.text
+
+    def test_champion_and_dev_leader_sections_are_present(self) -> None:
+        parsed = config_calcs.parse_config(BASE_CONFIG)
+        assert isinstance(parsed, Ok)
+        context = strategy_calcs.assemble_strategy_context(
+            "T", parsed.value, strategy_calcs.initial_state(), (), ("exact_match",)
+        )
+        prompt = prompt_calcs.build_strategy_prompt(context)
+        assert "# Primary artifact to refine — current champion" in prompt.text
+        assert "# Diagnostic dev leader" in prompt.text
+        assert "every candidate evaluation costs one peek" in prompt.text
 
     def test_reformat_note_appended(self) -> None:
         parsed = config_calcs.parse_config(BASE_CONFIG)

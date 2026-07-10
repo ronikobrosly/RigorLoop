@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "rigorloop"
 dynamic = ["version"]
-description = "Statistically-sound agentic build framework: dev/val/test-split loops that produce code artifacts without overfitting."
+description = "Statistically-sound agentic loop-engineering framework: dev/val/test-split loops that produce code artifacts without overfitting."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

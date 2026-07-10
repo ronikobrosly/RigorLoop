@@ -162,7 +162,7 @@ def build_executor_prompt(
         _render_dev_example(i, d) for i, d in enumerate(dev_sample, start=1)
     )
     text = (
-        "You are an executor agent inside RigorLoop, an iterative build framework. "
+        "You are an executor agent inside RigorLoop, an iterative loop-engineering framework. "
         "Your job is to produce one candidate solution for the task below.\n\n"
         f"# Task\n{task_description}\n\n"
         f"# Directive for this attempt\n{render_directive(directive)}\n\n"
@@ -214,12 +214,20 @@ def build_strategy_prompt(context: StrategyContext) -> AgentContextPrompt:
     )
     leaderboard = "\n".join(context.leaderboard_lines) if context.leaderboard_lines else "(empty)"
     champion_text = "(none yet)"
-    match context.champion, context.champion_dev_line:
-        case Some(artifact), Some(dev_line):
-            champion_text = (
-                f"{dev_line}\n<current-champion>\n{artifact.content}\n</current-champion>"
-            )
+    match context.champion, context.champion_line:
+        case Some(artifact), Some(line):
+            champion_text = f"{line}\n<current-champion>\n{artifact.content}\n</current-champion>"
         case _, _:
+            pass
+    dev_leader_text = (
+        "(the champion above is also the current dev leader)"
+        if isinstance(context.champion, Some)
+        else "(none yet)"
+    )
+    match context.dev_leader_line:
+        case Some(leader_line):
+            dev_leader_text = leader_line
+        case Nothing():
             pass
     failures = (
         "\n\n".join(
@@ -241,23 +249,28 @@ def build_strategy_prompt(context: StrategyContext) -> AgentContextPrompt:
             gap_text = ""
 
     text = (
-        "You are the strategy agent of RigorLoop, an iterative agentic build framework. "
+        "You are the strategy agent of RigorLoop, an iterative agentic loop-engineering framework. "
         "Each loop you review results on the DEV set and direct a pool of executor "
         "agents. Executors are stateless: they see only your directive, the task, the "
         "checks, and a dev sample — never scores or prior mistakes. If you set "
         "base_on_champion, the harness embeds the current champion's solution content "
-        "(content only) into that directive.\n\n"
+        "(content only) into that directive. The champion is the candidate with the "
+        "best validation evidence; before the first validation checkpoint it is the "
+        "dev leader. A raw dev lead alone does not make a candidate the champion.\n\n"
         f"# Task\n{context.task_description}\n\n"
         f"Target artifact: {kind_label(context.solution_kind)}\n\n"
         f"# Verification checks (all must pass per example)\n{checks_text}\n\n"
         f"# Run state\n"
         f"Loops completed: {context.loops_completed} of {context.max_loops}. "
-        f"Validation peeks used: {context.peeks_used} of {context.max_peeks}.\n"
+        f"Validation peeks used: {context.peeks_used} of {context.max_peeks} "
+        f"(each checkpoint validates a precommitted cohort of up to "
+        f"{context.cohort_size} candidates; every candidate evaluation costs one peek).\n"
         f"Note: {context.dev_subset_note}\n\n"
         f"# Your log — older loops (compacted)\n{compacted}\n\n"
         f"# Your log — recent loops (full detail)\n{recent}\n\n"
-        f"# Dev leaderboard (95% Wilson intervals)\n{leaderboard}\n\n"
-        f"# Current champion (dev-best) solution\n{champion_text}\n\n"
+        f"# Dev leaderboard (95% Wilson intervals; diagnostic only)\n{leaderboard}\n\n"
+        f"# Primary artifact to refine — current champion\n{champion_text}\n\n"
+        f"# Diagnostic dev leader\n{dev_leader_text}\n\n"
         f"# Failure patterns on dev (champion candidate, sampled)\n{failures}\n\n"
         f"# Validation checkpoints (aggregate scores only){gap_text}\n{val_text}\n\n"
         "# Your reply\n"

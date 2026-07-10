@@ -15,9 +15,10 @@ executors_per_loop     = 4
 dev_examples_in_prompt = 30
 
 [validation]
-val_every  = 3
-max_peeks  = 10
-patience   = 2
+val_every   = 3
+max_peeks   = 10
+cohort_size = 2
+patience    = 2
 target_pass_rate = 0.95
 
 [agents]

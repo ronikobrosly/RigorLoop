@@ -122,3 +122,4 @@ def test_base_config_matches_readme_defaults() -> None:
     assert isinstance(parsed, Ok)
     assert parsed.value.loop.max_consecutive_eval_failures == 5
     assert parsed.value.loop.strategy_full_detail_loops == 4
+    assert parsed.value.validation.cohort_size == 2

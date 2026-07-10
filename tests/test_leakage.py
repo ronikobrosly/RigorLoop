@@ -24,7 +24,7 @@ from rigorloop.core.types import (
 )
 from rigorloop.shell.cli import execute_run
 from tests.conftest import Recorder, make_project, scripted_agent
-from tests.test_e2e import TestJudgeCheck, TestSkillKind
+from tests.test_e2e import TestJudgeCheck, TestSkillKind, make_steering_scenario
 
 pytestmark = pytest.mark.e2e
 
@@ -86,6 +86,17 @@ class TestNoValTestLeakage:
     def test_judge_run(self, tmp_path: Path) -> None:
         recorder = Recorder(agent_handler=TestJudgeCheck.judging_agent)
         project = make_project(tmp_path, TestJudgeCheck.CONFIG)
+        assert execute_run(project, tmp_path, recorder.deps(), NOTHING) == 0
+        assert_no_holdout_leakage(tmp_path, recorder)
+
+    def test_validation_steered_run_never_embeds_the_overfit_leader(self, tmp_path: Path) -> None:
+        """The overfit dev leader's content (which the test seeded with holdout
+        inputs) must never enter an agent-context prompt: only the validation
+        champion's artifact is carried forward, and validation results reach
+        the strategy agent as aggregates only."""
+        scenario = make_steering_scenario()
+        recorder = Recorder(agent_handler=scenario.agent)
+        project = make_project(tmp_path)
         assert execute_run(project, tmp_path, recorder.deps(), NOTHING) == 0
         assert_no_holdout_leakage(tmp_path, recorder)
 
