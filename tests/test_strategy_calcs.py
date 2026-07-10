@@ -66,8 +66,16 @@ def score(vector: tuple[bool, ...], aborted: bool = False) -> CandidateScore:
     )
 
 
-def entry(candidate_id: str, vector: tuple[bool, ...], loop_index: int = 1) -> LeaderboardEntry:
-    return LeaderboardEntry(candidate_id, loop_index, ScriptSolution(), "content", score(vector))
+def entry(
+    candidate_id: str,
+    vector: tuple[bool, ...],
+    loop_index: int = 1,
+    based_on_champion: bool = False,
+    content: str = "content",
+) -> LeaderboardEntry:
+    return LeaderboardEntry(
+        candidate_id, loop_index, ScriptSolution(), content, score(vector), based_on_champion
+    )
 
 
 def validated(
@@ -308,11 +316,21 @@ class TestShouldValidate:
         state = state_with(1, board, peeks=10)
         assert not strategy_calcs.should_validate(state, config(), True, True)
 
-    def test_already_validated_candidate_is_skipped(self) -> None:
+    def test_no_peek_when_every_candidate_is_already_validated(self) -> None:
         board = (entry("a", (True, False)),)
         checkpoint = ValCheckpoint(1, "a", 0.5, 0.5, True)
         state = state_with(2, board, checkpoints=(checkpoint,), peeks=1, last_peek=1)
         assert not strategy_calcs.should_validate(state, config(), True, True)
+
+    def test_validated_dev_leader_does_not_block_new_candidates(self) -> None:
+        """An already-validated dev leader must not stall validation: newer
+        (even lower-dev) candidates still get their checkpoint."""
+        leader = entry("leader", (True, True, True, True))
+        newcomer = entry("newcomer", (True, True, True, False), loop_index=2)
+        board = strategy_calcs.fold_leaderboard((), (leader, newcomer))
+        checkpoint = ValCheckpoint(1, "leader", 1.0, 0.5, True)
+        state = state_with(2, board, checkpoints=(checkpoint,), peeks=1, last_peek=1)
+        assert strategy_calcs.should_validate(state, config(), False, False)
 
     def test_triggered_peek_respects_min_gap(self) -> None:
         text = BASE_CONFIG.replace("val_every  = 1", "val_every  = 10").replace(
@@ -329,6 +347,85 @@ class TestShouldValidate:
         assert strategy_calcs.should_validate(later, gapped, True, True)
         # Without a trigger, nothing is scheduled until loop 10.
         assert not strategy_calcs.should_validate(later, gapped, False, False)
+
+
+class TestSearchBase:
+    def test_dev_leader_before_any_validation(self) -> None:
+        board = strategy_calcs.fold_leaderboard(
+            (), (entry("weak", (True, False)), entry("strong", (True, True)))
+        )
+        base = strategy_calcs.search_base(state_with(1, board))
+        assert isinstance(base, Some)
+        assert base.value.candidate_id == "strong"
+
+    def test_validation_champion_once_one_exists(self) -> None:
+        """The search base is the validation champion even when a different
+        candidate leads the raw dev leaderboard."""
+        overfit = entry("overfit", (True,) * 10)
+        general = entry("general", (True,) * 9 + (False,))
+        board = strategy_calcs.fold_leaderboard((), (overfit, general))
+        champion = validated("general", (True,) * 9 + (False,), (True,) * 4)
+        state = state_with(1, board, val_champion=champion)
+        base = strategy_calcs.search_base(state)
+        assert isinstance(base, Some)
+        assert base.value.candidate_id == "general"
+
+    def test_empty_state_has_no_base(self) -> None:
+        assert strategy_calcs.search_base(state_with(0)) == Nothing()
+
+
+class TestValidationCohort:
+    def test_lower_dev_diverse_candidate_gets_the_last_slot(self) -> None:
+        """A lower-dev candidate not built on the champion is included, so a
+        better generalizer has a path to validation."""
+        board = strategy_calcs.fold_leaderboard(
+            (),
+            (
+                entry("a", (True,) * 10, based_on_champion=True),
+                entry("b", (True,) * 9 + (False,), based_on_champion=True),
+                entry("c", (True,) * 8 + (False,) * 2, based_on_champion=False),
+            ),
+        )
+        cohort = strategy_calcs.validation_cohort(state_with(1, board), config())
+        assert [e.candidate_id for e in cohort] == ["a", "c"]
+
+    def test_top_by_dev_when_all_are_diverse(self) -> None:
+        board = strategy_calcs.fold_leaderboard(
+            (),
+            (
+                entry("a", (True,) * 10),
+                entry("b", (True,) * 9 + (False,)),
+                entry("c", (True,) * 8 + (False,) * 2),
+            ),
+        )
+        cohort = strategy_calcs.validation_cohort(state_with(1, board), config())
+        assert [e.candidate_id for e in cohort] == ["a", "b"]
+
+    def test_already_validated_candidates_are_excluded(self) -> None:
+        board = strategy_calcs.fold_leaderboard(
+            (), (entry("a", (True,) * 10), entry("b", (True,) * 9 + (False,)))
+        )
+        checkpoint = ValCheckpoint(1, "a", 1.0, 0.5, True)
+        cohort = strategy_calcs.validation_cohort(
+            state_with(1, board, checkpoints=(checkpoint,), peeks=1, last_peek=1), config()
+        )
+        assert [e.candidate_id for e in cohort] == ["b"]
+
+    def test_capped_by_remaining_peek_budget(self) -> None:
+        board = strategy_calcs.fold_leaderboard(
+            (),
+            (
+                entry("a", (True,) * 10, based_on_champion=True),
+                entry("b", (True,) * 9 + (False,), based_on_champion=False),
+            ),
+        )
+        # One peek left: the top-dev candidate keeps priority over diversity.
+        cohort = strategy_calcs.validation_cohort(state_with(1, board, peeks=9), config())
+        assert [e.candidate_id for e in cohort] == ["a"]
+        assert strategy_calcs.validation_cohort(state_with(1, board, peeks=10), config()) == ()
+
+    def test_empty_leaderboard_yields_empty_cohort(self) -> None:
+        assert strategy_calcs.validation_cohort(state_with(1), config()) == ()
 
 
 class TestSelectValChampion:
@@ -349,15 +446,23 @@ class TestSelectValChampion:
         winner, improved = strategy_calcs.select_val_champion(Some(incumbent), challenger)
         assert winner == incumbent and not improved
 
-    def test_within_band_tie_broken_by_dev(self) -> None:
-        incumbent = validated("old", (True, False, False, False), (True, True, False, False))
-        challenger = validated("new", (True, True, False, False), (True, True, True, False))
+    def test_within_band_tie_broken_by_validation_rate(self) -> None:
+        incumbent = validated("old", (True, True, True, True), (True, True, False, False))
+        challenger = validated("new", (True, False, False, False), (True, True, True, False))
         winner, improved = strategy_calcs.select_val_champion(Some(incumbent), challenger)
         assert winner == challenger and not improved
 
-    def test_within_band_without_dev_edge_keeps_incumbent(self) -> None:
-        incumbent = validated("old", (True, True, False, False), (True, True, False, False))
-        challenger = validated("new", (True, True, False, False), (True, True, True, False))
+    def test_dev_score_never_breaks_the_tie(self) -> None:
+        """A higher-dev challenger with no validation edge must NOT displace
+        the incumbent — dev is the metric under selection pressure."""
+        incumbent = validated("old", (True, False, False, False), (True, True, True, False))
+        challenger = validated("new", (True, True, True, True), (True, True, True, False))
+        winner, improved = strategy_calcs.select_val_champion(Some(incumbent), challenger)
+        assert winner == incumbent and not improved
+
+    def test_within_band_with_lower_val_rate_keeps_incumbent(self) -> None:
+        incumbent = validated("old", (True, True, False, False), (True, True, True, False))
+        challenger = validated("new", (True, True, True, True), (True, True, False, False))
         winner, improved = strategy_calcs.select_val_champion(Some(incumbent), challenger)
         assert winner == incumbent and not improved
 
@@ -368,14 +473,20 @@ class TestStoppingDecision:
         assert decision == Some(BudgetExhausted(4))
         assert strategy_calcs.stopping_decision(state_with(3), config()) == Nothing()
 
-    def test_target_reached(self) -> None:
+    def test_target_reached_gates_on_the_lower_confidence_bound(self) -> None:
         text = BASE_CONFIG + "\n[validation.extra]\n"
         parsed = config_calcs.parse_config(
             text.replace("patience   = 3", "patience   = 3\ntarget_pass_rate = 0.9")
         )
         assert isinstance(parsed, Ok)
-        champion = validated("a", (True,) * 4, (True,) * 4)
-        state = state_with(1, val_champion=champion)
+        # 4/4 is a perfect point estimate, but its Wilson lower bound (~51%)
+        # is nowhere near the target: a lucky draw must not end the run.
+        lucky = validated("a", (True,) * 4, (True,) * 4)
+        state = state_with(1, val_champion=lucky)
+        assert strategy_calcs.stopping_decision(state, parsed.value) == Nothing()
+        # 40/40 clears the 90% target even at the lower bound.
+        solid = validated("b", (True,) * 40, (True,) * 40)
+        state = state_with(1, val_champion=solid)
         decision = strategy_calcs.stopping_decision(state, parsed.value)
         assert decision == Some(TargetReached(1.0))
 
@@ -388,6 +499,38 @@ class TestStoppingDecision:
             strategy_calcs.stopping_decision(state_with(2, checkpoints=improving), config())
             == Nothing()
         )
+
+    def test_plateau_groups_cohort_checkpoints_by_loop(self) -> None:
+        """A cohort of non-improving evaluations in one loop is ONE checkpoint
+        for the plateau rule, not several."""
+        one_loop_cohort = (
+            ValCheckpoint(3, "a", 0.5, 0.5, False),
+            ValCheckpoint(3, "b", 0.5, 0.5, False),
+            ValCheckpoint(4, "c", 0.5, 0.5, False),
+        )
+        # Only two distinct checkpoint loops < patience of 3: no plateau.
+        assert (
+            strategy_calcs.stopping_decision(state_with(2, checkpoints=one_loop_cohort), config())
+            == Nothing()
+        )
+        # A loop counts as improving if ANY cohort member displaced the champion.
+        three_loops = (
+            ValCheckpoint(2, "a", 0.5, 0.5, False),
+            ValCheckpoint(2, "b", 0.6, 0.6, True),
+            ValCheckpoint(3, "c", 0.5, 0.5, False),
+            ValCheckpoint(4, "d", 0.5, 0.5, False),
+        )
+        assert (
+            strategy_calcs.stopping_decision(state_with(2, checkpoints=three_loops), config())
+            == Nothing()
+        )
+        all_flat = tuple(
+            ValCheckpoint(loop, name, 0.5, 0.5, False)
+            for loop, name in ((2, "a"), (2, "b"), (3, "c"), (4, "d"))
+        )
+        assert strategy_calcs.stopping_decision(
+            state_with(2, checkpoints=all_flat), config()
+        ) == Some(ValidationPlateau(3))
 
     def test_unresponsive_strategy(self) -> None:
         decision = strategy_calcs.stopping_decision(state_with(1, fallbacks=2), config())
@@ -420,14 +563,73 @@ class TestContextAssembly:
         champion = context.champion
         assert isinstance(champion, Some)
         assert champion.value.candidate_id == "best"
-        assert isinstance(context.champion_dev_line, Some)
+        champion_line = context.champion_line
+        assert isinstance(champion_line, Some)
+        assert "no validation checkpoint yet" in champion_line.value
+        assert context.dev_leader_line == Nothing()
 
-    def test_gap_warning_appears_when_gap_is_wide(self) -> None:
-        board = (entry("best", (True, True, True, False)),)
-        wide = ValCheckpoint(
-            1, "best", dev_pass_rate=0.9, val_pass_rate=0.5, displaced_champion=True
+    def test_validation_champion_is_primary_and_dev_leader_is_diagnostic(self) -> None:
+        overfit = entry("overfit", (True,) * 10, content="OVERFIT CONTENT")
+        general = entry("general", (True,) * 9 + (False,), content="GENERAL CONTENT")
+        board = strategy_calcs.fold_leaderboard((), (overfit, general))
+        champion = validated("general", (True,) * 9 + (False,), (True,) * 4)
+        checkpoints = (
+            ValCheckpoint(1, "overfit", 1.0, 0.5, True),
+            ValCheckpoint(1, "general", 0.9, 1.0, False),
         )
-        state = RunState(1, board, (), NOTHING, (wide,), 1, Some(1), 0)
+        state = state_with(
+            1, board, checkpoints=checkpoints, peeks=2, last_peek=1, val_champion=champion
+        )
+        context = strategy_calcs.assemble_strategy_context(
+            "task", config(), state, (), ("exact_match",)
+        )
+        primary = context.champion
+        assert isinstance(primary, Some)
+        assert primary.value.candidate_id == "general"
+        assert primary.value.content == "GENERAL CONTENT"
+        champion_line = context.champion_line
+        assert isinstance(champion_line, Some)
+        assert "champion by validation score" in champion_line.value
+        leader_line = context.dev_leader_line
+        assert isinstance(leader_line, Some)
+        assert "overfit" in leader_line.value
+        assert "WARNING" in leader_line.value  # dev 100% vs validation 50%
+        # Diagnostic line carries aggregate scores only, never content.
+        assert "OVERFIT CONTENT" not in leader_line.value
+
+    def test_unvalidated_dev_leader_diagnostic_says_so(self) -> None:
+        leader = entry("leader", (True,) * 10, loop_index=2)
+        base = entry("base", (True,) * 9 + (False,))
+        board = strategy_calcs.fold_leaderboard((), (leader, base))
+        champion = validated("base", (True,) * 9 + (False,), (True,) * 4)
+        state = state_with(
+            2,
+            board,
+            checkpoints=(ValCheckpoint(1, "base", 0.9, 1.0, True),),
+            peeks=1,
+            last_peek=1,
+            val_champion=champion,
+        )
+        context = strategy_calcs.assemble_strategy_context(
+            "task", config(), state, (), ("exact_match",)
+        )
+        leader_line = context.dev_leader_line
+        assert isinstance(leader_line, Some)
+        assert "not yet validated" in leader_line.value
+
+    def test_gap_warning_appears_when_champion_gap_is_wide(self) -> None:
+        board = (entry("best", (True, True, True, False)),)
+        champion = validated("best", (True,) * 9 + (False,), (True, False, False, False))
+        state = RunState(
+            1,
+            board,
+            (),
+            Some(champion),
+            (ValCheckpoint(1, "best", 0.9, 0.25, True),),
+            1,
+            Some(1),
+            0,
+        )
         context = strategy_calcs.assemble_strategy_context(
             "task", config(), state, (), ("exact_match",)
         )

@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [SemVer](https://semver.org/) (`0.x`: minor = features/breaking, patch = fixes).
 
+## [Unreleased]
+
+### Changed
+
+- **Validation now steers the search, not just final selection.** Previously
+  the raw dev leaderboard chose both the artifact each loop refined and the
+  only candidate ever validated, so an overfit dev leader could monopolize the
+  run while a better generalizer was never measured on validation:
+  - The base artifact for refinement (`base_on_champion`) and the strategy
+    prompt's primary "champion" are now the **validation champion** once any
+    candidate has been validated (the dev leader before that). A diverging dev
+    leader is still shown, as a clearly labeled diagnostic line with an
+    overfit warning — aggregate scores only, never its content.
+  - Each validation checkpoint evaluates a **precommitted cohort** (new
+    `validation.cohort_size` knob, default 2): the top unvalidated candidates
+    by dev score, with the last slot reserved for the best unvalidated
+    candidate not built on the champion (approach diversity). `max_peeks` now
+    budgets individual candidate evaluations, and an already-validated dev
+    leader no longer stalls validation of newer candidates.
+  - Within the McNemar noise band, champion selection tie-breaks on the
+    validation pass rate instead of the dev pass rate (dev is the one metric
+    under direct selection pressure). Significant wins still gate the
+    plateau/patience rule, which now counts checkpoint loops rather than
+    individual cohort evaluations.
+  - `target_pass_rate` early stopping requires the validation score's Wilson
+    lower confidence bound to clear the target, not the raw point estimate.
+  - Per-candidate dev failure samples are persisted
+    (`failure_samples.json` in each candidate directory) and the champion's
+    are reloaded every loop, so the strategy agent keeps concrete
+    counterexamples across non-improving loops and `--resume`.
+  - The report's selection-bias caveat now states that validation both steered
+    the search and selected the winner (the untouched test set remains the
+    honest number).
+
 ## [v0.1.1]
 
 Documentation and repository-hygiene only; no changes to the `rigorloop`

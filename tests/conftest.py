@@ -101,8 +101,19 @@ def make_project(tmp_path: Path, config_text: str = BASE_CONFIG, n: int = TOY_N)
 
 def fake_script_runner(request: RunScriptRequest, scratch_dir: Path) -> ExecutionResult:
     """Interprets marker comments instead of spawning subprocesses, so E2E runs
-    stay in-process. The real runner is covered in test_io_actions."""
+    stay in-process. The real runner is covered in test_io_actions.
+
+    `# FAIL_ON:<input>` lines make an otherwise-correct script emit garbage for
+    those exact inputs — the deterministic stand-in for a candidate that does
+    well on some examples and badly on others."""
     content = Path(request.script_path).read_text(encoding="utf-8")
+    fail_on = {
+        line.removeprefix("# FAIL_ON:")
+        for line in content.splitlines()
+        if line.startswith("# FAIL_ON:")
+    }
+    if request.stdin_text in fail_on:
+        return ExecutionOk("WRONG OUTPUT")
     if "MODE=UPPER" in content:
         return ExecutionOk(request.stdin_text.upper())
     if "MODE=LOWER" in content:

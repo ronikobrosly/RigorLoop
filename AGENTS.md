@@ -6,7 +6,7 @@ code — its rules are hard constraints, not preferences.
 
 ## What this package is
 
-**RigorLoop** is a statistically-sound agentic build framework. You give it a
+**RigorLoop** is a statistically-sound agentic loop-engineering framework. You give it a
 task description, a pile of gold-standard input/output examples, and a set of
 checks; it runs agentic loops (a strategy agent directing concurrent executor
 agents) that iteratively build a solution and evaluate it on a strict
@@ -74,7 +74,7 @@ RigorLoop/
 │       │   ├── dataset_calcs.py  # parse examples, dedup, split, manifests, power warnings
 │       │   ├── prompt_calcs.py   # prompt builders (agent-context vs. evaluation channels)
 │       │   ├── scoring_calcs.py  # checks, aggregation, Wilson/bootstrap CIs, McNemar
-│       │   ├── strategy_calcs.py # validation cadence, stopping rules, champion selection
+│       │   ├── strategy_calcs.py # validation cohorts/cadence, stopping rules, champion selection
 │       │   └── report_calcs.py   # render report, check summary, budget estimate
 │       └── shell/                # IMPERATIVE SHELL — effects at the edges
 │           ├── __init__.py

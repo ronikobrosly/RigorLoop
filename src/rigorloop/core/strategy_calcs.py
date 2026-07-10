@@ -1,5 +1,10 @@
 """Pure strategy logic: context assembly, agent-reply parsing, validation
-cadence, stopping rules, champion selection, and the dev leaderboard."""
+cohorts and cadence, stopping rules, champion selection, and the dev
+leaderboard.
+
+The search base (the artifact future generations refine) is the validation
+champion once any candidate has been validated; the raw dev leaderboard is a
+diagnostic, not a selection rule."""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from rigorloop.core.scoring_calcs import example_passed, significantly_better
 from rigorloop.core.types import (
     NOTHING,
     BudgetExhausted,
+    CandidateScore,
     ChampionArtifact,
     ContinueDecision,
     DevExample,
@@ -254,6 +260,20 @@ def dev_best(leaderboard: tuple[LeaderboardEntry, ...]) -> Option[LeaderboardEnt
     return Some(leaderboard[0]) if leaderboard else NOTHING
 
 
+def search_base(state: RunState) -> Option[LeaderboardEntry]:
+    """The primary exploitation base for the next generation: the validation
+    champion once any candidate has been validated, the dev leader before
+    that. Validation evidence — not raw dev rank — steers the search."""
+    match state.val_champion:
+        case Some(champion):
+            found = next(
+                (e for e in state.leaderboard if e.candidate_id == champion.candidate_id), None
+            )
+            return Some(found) if found is not None else dev_best(state.leaderboard)
+        case Nothing():
+            return dev_best(state.leaderboard)
+
+
 def champion_artifact(entry: LeaderboardEntry) -> ChampionArtifact:
     return ChampionArtifact(entry.candidate_id, entry.kind, entry.content)
 
@@ -328,8 +348,26 @@ def failure_samples(
 
 
 # --------------------------------------------------------------------------
-# Validation cadence and champion selection
+# Validation cohorts, cadence, and champion selection
 # --------------------------------------------------------------------------
+
+
+def validation_cohort(state: RunState, config: RunConfig) -> tuple[LeaderboardEntry, ...]:
+    """The candidates a checkpoint will evaluate, precommitted before any of
+    that checkpoint's validation outcomes are seen: the top unvalidated
+    candidates by dev score, with the last slot reserved for the best
+    unvalidated candidate NOT built on the champion (approach diversity).
+    Capped by the remaining peek budget — every evaluation costs one peek."""
+    already_validated = {c.candidate_id for c in state.checkpoints}
+    unvalidated = tuple(e for e in state.leaderboard if e.candidate_id not in already_validated)
+    size = min(config.validation.cohort_size, config.validation.max_peeks - state.peeks_used)
+    if size <= 0 or not unvalidated:
+        return ()
+    top = unvalidated[:size]
+    diverse = next((e for e in unvalidated if not e.based_on_champion), None)
+    if diverse is None or diverse in top or size < 2:
+        return top
+    return (*top[:-1], diverse)
 
 
 def should_validate(
@@ -338,13 +376,10 @@ def should_validate(
     strategy_requested: bool,
     new_best_significant: bool,
 ) -> bool:
-    """Peeks are budgeted; triggered peeks respect a minimum gap so early easy
-    wins can't front-load the budget."""
-    best = dev_best(state.leaderboard)
-    if isinstance(best, Nothing) or state.peeks_used >= config.validation.max_peeks:
-        return False
-    already_validated = {c.candidate_id for c in state.checkpoints}
-    if best.value.candidate_id in already_validated:
+    """Peeks are budgeted per candidate evaluation; triggered peeks respect a
+    minimum gap so early easy wins can't front-load the budget. A checkpoint
+    runs only when its precommitted cohort has at least one candidate."""
+    if not validation_cohort(state, config):
         return False
     scheduled = state.loops_completed % config.validation.val_every == 0
     match state.last_peek_loop:
@@ -359,11 +394,14 @@ def should_validate(
 def select_val_champion(
     incumbent: Option[ValidatedCandidate], challenger: ValidatedCandidate
 ) -> tuple[ValidatedCandidate, bool]:
-    """Noise-aware selection: (winner, improvement).
+    """Noise-aware selection on validation evidence only: (winner, improvement).
 
-    A challenger displaces the incumbent only beyond the paired-test noise
-    band; within the band the dev score breaks the tie (without counting as
-    improvement for the plateau rule)."""
+    A challenger counts as an improvement (for the plateau rule) only beyond
+    the paired-test noise band; within the band a higher raw validation rate
+    takes the title without counting as improvement. Dev scores never break
+    the tie — dev is the metric under direct selection pressure, and letting
+    it decide here would let an overfit dev leader displace a better
+    generalizer."""
     match incumbent:
         case Nothing():
             return challenger, True
@@ -376,7 +414,7 @@ def select_val_champion(
                 current.val_score.pass_vector, challenger.val_score.pass_vector, ALPHA
             ):
                 return current, False
-            tie_break = challenger.dev_score.pass_rate > current.dev_score.pass_rate
+            tie_break = challenger.val_score.pass_rate > current.val_score.pass_rate
             return (challenger, False) if tie_break else (current, False)
 
 
@@ -392,13 +430,23 @@ def stopping_decision(state: RunState, config: RunConfig) -> Option[StopReason]:
         return Some(StrategyUnresponsive(state.consecutive_fallbacks))
     match config.validation.target_pass_rate, state.val_champion:
         case Some(target), Some(champion):
-            if champion.val_score.pass_rate >= target:
+            # Gate on the lower confidence bound, not the point estimate: a
+            # lucky draw on a small validation set must not end the run.
+            if champion.val_score.ci_low >= target:
                 return Some(TargetReached(champion.val_score.pass_rate))
         case _, _:
             pass
     patience = config.validation.patience
-    recent = state.checkpoints[-patience:]
-    if len(recent) == patience and all(not c.displaced_champion for c in recent):
+    # A checkpoint evaluates a whole cohort, so the plateau rule counts
+    # checkpoint LOOPS; a loop improved if any cohort member displaced the
+    # champion beyond the noise band.
+    checkpoint_loops = tuple(sorted({c.loop_index for c in state.checkpoints}))
+    recent = checkpoint_loops[-patience:]
+    improved = tuple(
+        any(c.displaced_champion for c in state.checkpoints if c.loop_index == loop)
+        for loop in recent
+    )
+    if len(recent) == patience and not any(improved):
         return Some(ValidationPlateau(patience))
     if state.loops_completed >= config.loop.max_loops:
         return Some(BudgetExhausted(config.loop.max_loops))
@@ -444,6 +492,47 @@ def compact_log_line(entry: StrategyLogEntry) -> str:
     return f"loop {entry.loop_index}: [{approaches}] | {entry.dev_summary}{val_text}"
 
 
+def _score_span(score: CandidateScore) -> str:
+    return f"{score.pass_rate:.1%} [{score.ci_low:.1%}, {score.ci_high:.1%}] on n={score.n}"
+
+
+def _champion_line(entry: LeaderboardEntry, val_champion: Option[ValidatedCandidate]) -> str:
+    match val_champion:
+        case Some(champion) if champion.candidate_id == entry.candidate_id:
+            return (
+                f"{entry.candidate_id}: dev {_score_span(champion.dev_score)}; "
+                f"validation {_score_span(champion.val_score)} — champion by validation score"
+            )
+        case Some(_) | Nothing():
+            return (
+                f"{entry.candidate_id}: dev {_score_span(entry.score)} — dev leader "
+                "(no validation checkpoint yet)"
+            )
+
+
+def _latest_val_rate(checkpoints: tuple[ValCheckpoint, ...], candidate_id: str) -> Option[float]:
+    rates = tuple(c.val_pass_rate for c in checkpoints if c.candidate_id == candidate_id)
+    return Some(rates[-1]) if rates else NOTHING
+
+
+def _dev_leader_line(best: LeaderboardEntry, state: RunState) -> str:
+    """Diagnostic line for a dev leader that is NOT the champion: aggregate
+    scores only, never its content."""
+    base_text = f"{best.candidate_id} (loop {best.loop_index}): dev {_score_span(best.score)}"
+    match _latest_val_rate(state.checkpoints, best.candidate_id):
+        case Some(val_rate):
+            gap = best.score.pass_rate - val_rate
+            warning = (
+                " — WARNING: large dev-val gap; likely overfit to the dev set. "
+                "Do not chase its dev score."
+                if gap > _GAP_WARN
+                else ""
+            )
+            return f"{base_text}; validation {val_rate:.1%}{warning}"
+        case Nothing():
+            return f"{base_text}; not yet validated"
+
+
 def assemble_strategy_context(
     task_description: str,
     config: RunConfig,
@@ -452,35 +541,44 @@ def assemble_strategy_context(
     check_names: tuple[str, ...],
 ) -> StrategyContext:
     """Full detail for the most recent loops, compact lines beyond that, the
-    dev leaderboard with CIs, dev failure patterns, the champion's content,
-    and aggregate validation scores. Nothing else."""
+    dev leaderboard with CIs, the champion's content and dev failure patterns,
+    a diagnostic line for a diverging dev leader, and aggregate validation
+    scores. Nothing else."""
     detail = config.loop.strategy_full_detail_loops
     recent = state.strategy_log[-detail:]
     compacted = tuple(compact_log_line(e) for e in state.strategy_log[:-detail])
 
-    best = dev_best(state.leaderboard)
+    base = search_base(state)
     champion: Option[ChampionArtifact] = NOTHING
-    champion_dev_line: Option[str] = NOTHING
-    match best:
+    champion_line: Option[str] = NOTHING
+    match base:
         case Some(entry):
             champion = Some(champion_artifact(entry))
-            champion_dev_line = Some(
-                f"{entry.candidate_id}: dev {entry.score.pass_rate:.1%} "
-                f"[{entry.score.ci_low:.1%}, {entry.score.ci_high:.1%}] on n={entry.score.n}"
-            )
+            champion_line = Some(_champion_line(entry, state.val_champion))
         case Nothing():
+            pass
+
+    dev_leader_line: Option[str] = NOTHING
+    match base, dev_best(state.leaderboard):
+        case Some(base_entry), Some(best_entry) if (
+            base_entry.candidate_id != best_entry.candidate_id
+        ):
+            dev_leader_line = Some(_dev_leader_line(best_entry, state))
+        case _, _:
             pass
 
     val_lines = tuple(val_summary_line(c) for c in state.checkpoints)
     gap_warning: Option[str] = NOTHING
-    if state.checkpoints:
-        last = state.checkpoints[-1]
-        gap = last.dev_pass_rate - last.val_pass_rate
-        if gap > _GAP_WARN:
-            gap_warning = Some(
-                f"WARNING: dev-val gap is {gap:+.1%} — the loop may be overfitting "
-                "to the dev set. Prefer simpler, more general approaches."
-            )
+    match state.val_champion:
+        case Some(val_champion):
+            gap = val_champion.dev_score.pass_rate - val_champion.val_score.pass_rate
+            if gap > _GAP_WARN:
+                gap_warning = Some(
+                    f"WARNING: the champion's dev-val gap is {gap:+.1%} — the loop may be "
+                    "overfitting to the dev set. Prefer simpler, more general approaches."
+                )
+        case Nothing():
+            pass
 
     return StrategyContext(
         task_description=task_description,
@@ -494,11 +592,13 @@ def assemble_strategy_context(
         leaderboard_lines=render_leaderboard_lines(state.leaderboard),
         failure_samples=samples,
         champion=champion,
-        champion_dev_line=champion_dev_line,
+        champion_line=champion_line,
+        dev_leader_line=dev_leader_line,
         val_lines=val_lines,
         dev_val_gap_warning=gap_warning,
         peeks_used=state.peeks_used,
         max_peeks=config.validation.max_peeks,
+        cohort_size=config.validation.cohort_size,
         dev_subset_note=(
             "Executor agents see a dev-example subset that is resampled every loop; "
             "some loop-to-loop score movement is sample luck, and differences marked "

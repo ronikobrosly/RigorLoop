@@ -57,6 +57,7 @@ def test_minimal_config_gets_documented_defaults() -> None:
     assert config.validation.max_peeks == 10
     assert config.validation.min_loops_between_peeks == 2
     assert config.validation.patience == 2
+    assert config.validation.cohort_size == 2
     assert config.validation.target_pass_rate == Nothing()
     assert config.agents.model == config_calcs.DEFAULT_MODEL
     assert config.agents.timeout_s == 300.0
@@ -76,6 +77,7 @@ seed = 99
 
 [validation]
 target_pass_rate = 0.9
+cohort_size = 3
 
 [[checks]]
 type = "exact_match"
@@ -112,6 +114,7 @@ pass_threshold = 0.6
     assert config.task.solution_kind == SkillSolution()
     assert config.split.ratios.dev == 0.5
     assert config.validation.target_pass_rate == Some(0.9)
+    assert config.validation.cohort_size == 3
     assert config.checks == (
         ExactMatch(),
         NormalizedMatch(lowercase=False, strip=True, collapse_whitespace=True),
@@ -197,6 +200,7 @@ def test_judge_requires_rubric_and_valid_threshold() -> None:
         "[validation]\nmax_peeks = 0",
         "[validation]\nmin_loops_between_peeks = 'x'",
         "[validation]\npatience = -1",
+        "[validation]\ncohort_size = 0",
         "[validation]\ntarget_pass_rate = 'high'",
         "[agents]\nmodel = 3",
         "[agents]\ntimeout_s = 'x'",

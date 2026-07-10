@@ -176,6 +176,9 @@ def _parse_validation(data: dict[str, object]) -> Result[ValidationConfig, Confi
     patience = _get_int(table, "patience", "validation.patience", 2)
     if isinstance(patience, Err):
         return patience
+    cohort_size = _get_int(table, "cohort_size", "validation.cohort_size", 2)
+    if isinstance(cohort_size, Err):
+        return cohort_size
     target: Option[float] = NOTHING
     if "target_pass_rate" in table:
         parsed = _get_float(table, "target_pass_rate", "validation.target_pass_rate", 0.0)
@@ -185,7 +188,14 @@ def _parse_validation(data: dict[str, object]) -> Result[ValidationConfig, Confi
             return Err(InvalidValue("validation.target_pass_rate", "must be in (0, 1]"))
         target = Some(parsed.value)
     return Ok(
-        ValidationConfig(val_every.value, max_peeks.value, min_gap.value, patience.value, target)
+        ValidationConfig(
+            val_every.value,
+            max_peeks.value,
+            min_gap.value,
+            patience.value,
+            target,
+            cohort_size.value,
+        )
     )
 
 

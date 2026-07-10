@@ -394,6 +394,21 @@ def _strategy_decision(
 # --------------------------------------------------------------------------
 
 
+def _champion_failure_samples(run_path: Path, state: RunState) -> tuple[FailureSample, ...]:
+    """Reload the search base's persisted dev failure samples, so the strategy
+    agent keeps concrete counterexamples for the artifact it is refining even
+    across non-improving loops and resume."""
+    match strategy_calcs.search_base(state):
+        case Some(entry):
+            path = (
+                io_actions.candidate_dir(run_path, entry.loop_index, entry.candidate_id)
+                / "failure_samples.json"
+            )
+            return io_actions.read_failure_samples(path)
+        case Nothing():
+            return ()
+
+
 def execute_run(
     project: LoadedProject,
     project_dir: Path,
@@ -472,10 +487,6 @@ def execute_run(
     check_pairs = scoring_calcs.named_checks(config.checks)
     check_names = tuple(name for name, _ in check_pairs)
 
-    # In-memory only: failing examples of the champion candidate from the most
-    # recent loop, for the strategy context. Empty after a resume.
-    last_samples: tuple[FailureSample, ...] = ()
-
     stop_reason: StopReason | None = None
     while stop_reason is None:
         pre_stop = strategy_calcs.stopping_decision(state, config)
@@ -491,7 +502,11 @@ def execute_run(
         deps.echo(f"loop {loop_index}: strategy turn")
 
         context = strategy_calcs.assemble_strategy_context(
-            project.task_description, config, state, last_samples, check_names
+            project.task_description,
+            config,
+            state,
+            _champion_failure_samples(run_path, state),
+            check_names,
         )
         strategy_prompt = prompt_calcs.build_strategy_prompt(context)
         io_actions.write_text(loop_path / "strategy_prompt.md", strategy_prompt.text)
@@ -502,8 +517,8 @@ def execute_run(
                 decision: StrategyDecision = parsed_decision
                 fallback_used = False
             case Nothing():
-                best_now = strategy_calcs.dev_best(state.leaderboard)
-                decision = strategy_calcs.fallback_decision(isinstance(best_now, Some))
+                base_now = strategy_calcs.search_base(state)
+                decision = strategy_calcs.fallback_decision(isinstance(base_now, Some))
                 fallback_used = True
                 deps.echo(f"loop {loop_index}: strategy reply malformed; using fallback directive")
 
@@ -542,10 +557,14 @@ def execute_run(
             case ContinueDecision():
                 pass
 
+        # Significance for validation triggers is still judged against the raw
+        # dev leader; the artifact executors refine is the search base (the
+        # validation champion once one exists).
         previous_best = strategy_calcs.dev_best(state.leaderboard)
+        base = strategy_calcs.search_base(state)
         champion = (
-            Some(strategy_calcs.champion_artifact(previous_best.value))
-            if isinstance(previous_best, Some)
+            Some(strategy_calcs.champion_artifact(base.value))
+            if isinstance(base, Some)
             else NOTHING
         )
         directives = strategy_calcs.build_directives(
@@ -615,7 +634,6 @@ def execute_run(
                     )
 
         new_entries: list[LeaderboardEntry] = []
-        loop_results: dict[str, tuple[ExampleResult, ...]] = {}
         for candidate in candidates:
             deps.echo(f"loop {loop_index}: evaluating {candidate.candidate_id} on dev")
             cand_path = io_actions.candidate_dir(run_path, loop_index, candidate.candidate_id)
@@ -625,6 +643,10 @@ def execute_run(
                 cand_path / io_actions.solution_filename(candidate.kind), candidate.content
             )
             io_actions.write_json(cand_path / "scores.json", io_actions.score_to_json(score))
+            io_actions.write_failure_samples(
+                cand_path / "failure_samples.json",
+                strategy_calcs.failure_samples(split.dev, results),
+            )
             for result in results:
                 io_actions.append_jsonl(
                     cand_path / "outputs.jsonl",
@@ -646,7 +668,6 @@ def execute_run(
                         ],
                     },
                 )
-            loop_results[candidate.candidate_id] = results
             new_entries.append(
                 LeaderboardEntry(
                     candidate_id=candidate.candidate_id,
@@ -654,6 +675,10 @@ def execute_run(
                     kind=candidate.kind,
                     content=candidate.content,
                     score=score,
+                    based_on_champion=any(
+                        d.directive_id == candidate.directive_id and isinstance(d.base, Some)
+                        for d in directives
+                    ),
                 )
             )
 
@@ -668,57 +693,51 @@ def execute_run(
             consecutive_fallbacks=consecutive_fallbacks,
         )
 
-        best_after = strategy_calcs.dev_best(leaderboard)
-        match best_after:
-            case Some(best_entry) if best_entry.candidate_id in loop_results:
-                last_samples = strategy_calcs.failure_samples(
-                    split.dev, loop_results[best_entry.candidate_id]
-                )
-            case _:
-                last_samples = ()
-
         val_summary: Option[str] = NOTHING
         if strategy_calcs.should_validate(
             state, config, decision.request_validation, new_best_significant
         ):
-            match strategy_calcs.dev_best(state.leaderboard):
-                case Some(entry):
-                    deps.echo(f"loop {loop_index}: validation peek at {entry.candidate_id}")
-                    val_candidate = Candidate(
-                        entry.candidate_id, loop_index, entry.kind, entry.content, "validation"
-                    )
-                    val_path = loop_path / "validation" / entry.candidate_id
-                    val_results, val_aborted = _evaluate_candidate(
-                        val_candidate, val_examples, config, deps, val_path
-                    )
-                    val_score = _score(val_results, val_examples, config.checks, val_aborted)
-                    challenger = ValidatedCandidate(
-                        candidate_id=entry.candidate_id,
-                        kind=entry.kind,
-                        content=entry.content,
-                        dev_score=entry.score,
-                        val_score=val_score,
-                    )
-                    winner, improved = strategy_calcs.select_val_champion(
-                        state.val_champion, challenger
-                    )
-                    checkpoint = ValCheckpoint(
-                        loop_index=loop_index,
-                        candidate_id=entry.candidate_id,
-                        dev_pass_rate=entry.score.pass_rate,
-                        val_pass_rate=val_score.pass_rate,
-                        displaced_champion=improved,
-                    )
-                    state = replace(
-                        state,
-                        val_champion=Some(winner),
-                        checkpoints=(*state.checkpoints, checkpoint),
-                        peeks_used=state.peeks_used + 1,
-                        last_peek_loop=Some(loop_index),
-                    )
-                    val_summary = Some(strategy_calcs.val_summary_line(checkpoint))
-                case Nothing():
-                    pass
+            # The cohort is precommitted from pre-checkpoint state: none of
+            # this checkpoint's validation outcomes influence who is in it.
+            cohort = strategy_calcs.validation_cohort(state, config)
+            summaries: list[str] = []
+            for entry in cohort:
+                deps.echo(f"loop {loop_index}: validation peek at {entry.candidate_id}")
+                val_candidate = Candidate(
+                    entry.candidate_id, loop_index, entry.kind, entry.content, "validation"
+                )
+                val_path = loop_path / "validation" / entry.candidate_id
+                val_results, val_aborted = _evaluate_candidate(
+                    val_candidate, val_examples, config, deps, val_path
+                )
+                val_score = _score(val_results, val_examples, config.checks, val_aborted)
+                challenger = ValidatedCandidate(
+                    candidate_id=entry.candidate_id,
+                    kind=entry.kind,
+                    content=entry.content,
+                    dev_score=entry.score,
+                    val_score=val_score,
+                )
+                winner, improved = strategy_calcs.select_val_champion(
+                    state.val_champion, challenger
+                )
+                checkpoint = ValCheckpoint(
+                    loop_index=loop_index,
+                    candidate_id=entry.candidate_id,
+                    dev_pass_rate=entry.score.pass_rate,
+                    val_pass_rate=val_score.pass_rate,
+                    displaced_champion=improved,
+                )
+                state = replace(
+                    state,
+                    val_champion=Some(winner),
+                    checkpoints=(*state.checkpoints, checkpoint),
+                    peeks_used=state.peeks_used + 1,
+                    last_peek_loop=Some(loop_index),
+                )
+                summaries.append(strategy_calcs.val_summary_line(checkpoint))
+            if summaries:
+                val_summary = Some("; ".join(summaries))
 
         entry_log = StrategyLogEntry(
             loop_index=loop_index,
@@ -1035,9 +1054,10 @@ executors_per_loop     = 4
 dev_examples_in_prompt = 30
 
 [validation]
-val_every  = 3
-max_peeks  = 10
-patience   = 2
+val_every   = 3
+max_peeks   = 10
+cohort_size = 2
+patience    = 2
 target_pass_rate = 0.95
 
 [agents]
