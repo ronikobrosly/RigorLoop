@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.webp" alt="RigorLoop logo" width="400">
+</p>
+
 # RigorLoop
 
 A statistically-sound agentic loop-engineering framework. You give it a task description,
